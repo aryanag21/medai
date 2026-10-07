@@ -126,7 +126,11 @@ class ApiClient {
     final response = await http.post(
       Uri.parse('$baseUrl/devices'),
       headers: await _authHeaders(),
-      body: jsonEncode({'device_type': deviceType, if (label != null) 'label': label}),
+      body: jsonEncode(
+        label != null
+            ? {'device_type': deviceType, 'label': label}
+            : {'device_type': deviceType},
+      ),
     );
     if (response.statusCode != 201) {
       throw ApiException('failed to register device: ${response.statusCode} ${response.body}');
