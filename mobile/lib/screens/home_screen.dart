@@ -3,6 +3,7 @@ import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
+import '../services/api_client.dart';
 import '../services/health_connect_adapter.dart';
 import '../services/health_sync_service.dart';
 import 'conversation_screen.dart';
@@ -22,6 +23,66 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _syncing = false;
 
   bool get _healthConnectSupported => !kIsWeb && Platform.isAndroid;
+
+  @override
+  void initState() {
+    super.initState();
+    ApiClient.getServerUrl();
+  }
+
+  Future<void> _showServerUrlDialog() async {
+    final currentUrl = await ApiClient.getServerUrl();
+    final controller = TextEditingController(text: currentUrl);
+
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Backend Server URL'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Enter your Cloudflare tunnel or backend URL (e.g. https://...trycloudflare.com):',
+              style: TextStyle(fontSize: 13),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                hintText: 'https://...',
+                labelText: 'Server URL',
+              ),
+              keyboardType: TextInputType.url,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              final newUrl = controller.text.trim();
+              if (newUrl.isNotEmpty) {
+                await ApiClient.setServerUrl(newUrl);
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Server URL set to: $newUrl')),
+                  );
+                }
+              }
+              if (ctx.mounted) Navigator.of(ctx).pop();
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+  }
 
   Future<void> _syncHealthData() async {
     setState(() => _syncing = true);
@@ -50,7 +111,16 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('MEDAI')),
+      appBar: AppBar(
+        title: const Text('MEDAI'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            tooltip: 'Server Settings',
+            onPressed: _showServerUrlDialog,
+          ),
+        ],
+      ),
       body: Center(
         child: Padding(
           padding: const EdgeInsets.all(24.0),

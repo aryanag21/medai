@@ -15,12 +15,29 @@ import 'package:uuid/uuid.dart';
 /// for testing the Phase 2 conversation pipeline, not a real authentication UX; it is replaced
 /// once Phase 1's mobile screens (consent, onboarding, login) are built.
 class ApiClient {
-  ApiClient({String? baseUrl}) : baseUrl = baseUrl ?? _defaultBaseUrl;
+  ApiClient({String? baseUrl}) : baseUrl = baseUrl ?? _activeBaseUrl;
 
-  // Android emulators reach the host machine at 10.0.2.2, not localhost. Web/desktop use
-  // localhost directly. Override via ApiClient(baseUrl: ...) for a real device/deployment.
-  static String get _defaultBaseUrl =>
-      !kIsWeb && Platform.isAndroid ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
+  static const String _defaultBaseUrl = 'https://dvds-canvas-testament-milk.trycloudflare.com';
+  static String _activeBaseUrl = _defaultBaseUrl;
+  static const _serverUrlKey = 'medai_server_url';
+
+  /// Reads any custom server URL saved in secure storage, updating _activeBaseUrl.
+  static Future<String> getServerUrl() async {
+    const storage = FlutterSecureStorage();
+    final saved = await storage.read(key: _serverUrlKey);
+    if (saved != null && saved.trim().isNotEmpty) {
+      _activeBaseUrl = saved.trim().replaceAll(RegExp(r'/+$'), '');
+    }
+    return _activeBaseUrl;
+  }
+
+  /// Sets and persists a new server URL.
+  static Future<void> setServerUrl(String url) async {
+    final cleaned = url.trim().replaceAll(RegExp(r'/+$'), '');
+    _activeBaseUrl = cleaned.isNotEmpty ? cleaned : _defaultBaseUrl;
+    const storage = FlutterSecureStorage();
+    await storage.write(key: _serverUrlKey, value: _activeBaseUrl);
+  }
 
   final String baseUrl;
   final _storage = const FlutterSecureStorage();
