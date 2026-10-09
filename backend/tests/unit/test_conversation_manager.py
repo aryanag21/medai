@@ -68,3 +68,30 @@ async def test_generate_reply_returns_none_when_nothing_missing() -> None:
     state = _empty_state(unknowns=[])
     reply = await generate_reply(NotConfiguredLLMProvider(), state)
     assert reply is None
+
+
+async def test_generate_reply_does_not_repeat_previously_asked_questions() -> None:
+    state = _empty_state(unknowns=["allergies", "current_medications"])
+    # Turn 1: No previous questions asked -> asks about allergies
+    reply1 = await generate_reply(NotConfiguredLLMProvider(), state, past_assistant_messages=[])
+    assert "allerg" in reply1.lower()
+
+    # Turn 2: Assistant previously asked about allergies -> advances to medications, does NOT repeat allergies
+    reply2 = await generate_reply(
+        NotConfiguredLLMProvider(),
+        state,
+        past_assistant_messages=["Could you tell me about any known drug allergies?"],
+    )
+    assert "allerg" not in reply2.lower()
+    assert "medication" in reply2.lower()
+
+    # Turn 3: Both allergies and medications were asked -> returns None (ready for assessment)
+    reply3 = await generate_reply(
+        NotConfiguredLLMProvider(),
+        state,
+        past_assistant_messages=[
+            "Could you tell me about any known drug allergies?",
+            "Could you tell me about any medications you're currently taking?",
+        ],
+    )
+    assert reply3 is None

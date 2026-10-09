@@ -52,6 +52,16 @@ def create_app() -> FastAPI:
     app.include_router(devices_router)
     app.include_router(privacy_router)
 
+    @app.get("/download")
+    async def download_apk():
+        from pathlib import Path
+        from fastapi import HTTPException
+        from fastapi.responses import FileResponse
+        apk_path = Path("C:/Users/aryan/VIT/sem-5/es/medai-apk/medai-android-release-apk/app-release.apk")
+        if not apk_path.exists():
+            raise HTTPException(status_code=404, detail="APK file not found")
+        return FileResponse(apk_path, filename="medai.apk", media_type="application/vnd.android.package-archive")
+
     return app
 
 

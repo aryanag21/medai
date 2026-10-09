@@ -67,7 +67,42 @@ async def _phrase_question(item: MissingInfoItem, llm: LLMProvider) -> str:
     return f"Could you tell me {item.prompt_hint}?"
 
 
-async def generate_reply(llm: LLMProvider, state: PatientState) -> str | None:
+def detect_asked_fields(past_assistant_messages: list[str]) -> set[str]:
+    """Detects which topics have already been asked by the assistant in the conversation
+    so we never ask duplicate or repetitive questions (conversation_manager.rules:
+    'Do not ask unnecessary or duplicate questions').
+    """
+    asked = set()
+    for text in past_assistant_messages:
+        t = text.lower()
+        if "allerg" in t:
+            asked.add("allergies")
+        if "medicat" in t or "medicine" in t or "taking" in t:
+            asked.add("current_medications")
+        if "history" in t or "condition" in t or "ongoing" in t:
+            asked.add("known_conditions")
+        if "your age" in t or "how old" in t:
+            asked.add("age")
+        if "your sex" in t or "gender" in t:
+            asked.add("sex")
+        if "your height" in t:
+            asked.add("height_cm")
+        if "your weight" in t:
+            asked.add("weight_kg")
+        if "severe" in t or "scale of 0 to 10" in t:
+            asked.add("severity")
+        if "how long" in t or "duration" in t:
+            asked.add("duration")
+        if "when" in t and ("start" in t or "onset" in t):
+            asked.add("onset")
+    return asked
+
+
+async def generate_reply(
+    llm: LLMProvider,
+    state: PatientState,
+    past_assistant_messages: list[str] | None = None,
+) -> str | None:
     """conversation_manager.flow steps 3-6: identify missing info, decide the next action,
     and — if it's ASK_QUESTION — phrase the highest-priority one
     (conversation_manager.question_priority order, already applied by identify_missing_info).
@@ -80,7 +115,8 @@ async def generate_reply(llm: LLMProvider, state: PatientState) -> str | None:
     have.
     """
 
-    items = identify_missing_info(state)
+    asked_fields = detect_asked_fields(past_assistant_messages or [])
+    items = identify_missing_info(state, asked_fields=asked_fields)
     action = select_action(items)
 
     if action == "ASK_QUESTION":

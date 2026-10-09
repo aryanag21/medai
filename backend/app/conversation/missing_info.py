@@ -54,7 +54,7 @@ def _passes_pre_question_checks(item: MissingInfoItem, state: PatientState) -> b
     return True
 
 
-def identify_missing_info(state: PatientState) -> list[MissingInfoItem]:
+def identify_missing_info(state: PatientState, asked_fields: set[str] | None = None) -> list[MissingInfoItem]:
     """conversation_manager.flow step 3 (identify_missing_clinically_relevant_information).
 
     Deterministic and DB-driven only — never invents a value, never infers from unstructured
@@ -65,10 +65,11 @@ def identify_missing_info(state: PatientState) -> list[MissingInfoItem]:
     invent either.
     """
 
+    asked = asked_fields or set()
     items: list[MissingInfoItem] = []
 
     for symptom in state.symptoms:
-        if symptom.severity is None:
+        if symptom.severity is None and f"symptom:{symptom.symptom}:severity" not in asked and "severity" not in asked:
             items.append(
                 MissingInfoItem(
                     field=f"symptom:{symptom.symptom}:severity",
@@ -76,7 +77,7 @@ def identify_missing_info(state: PatientState) -> list[MissingInfoItem]:
                     prompt_hint=f"how severe your {symptom.symptom} is, on a scale of 0 to 10",
                 )
             )
-        if symptom.duration is None:
+        if symptom.duration is None and f"symptom:{symptom.symptom}:duration" not in asked and "duration" not in asked:
             items.append(
                 MissingInfoItem(
                     field=f"symptom:{symptom.symptom}:duration",
@@ -84,7 +85,7 @@ def identify_missing_info(state: PatientState) -> list[MissingInfoItem]:
                     prompt_hint=f"how long you've had {symptom.symptom}",
                 )
             )
-        if symptom.onset is None:
+        if symptom.onset is None and f"symptom:{symptom.symptom}:onset" not in asked and "onset" not in asked:
             items.append(
                 MissingInfoItem(
                     field=f"symptom:{symptom.symptom}:onset",
@@ -93,11 +94,11 @@ def identify_missing_info(state: PatientState) -> list[MissingInfoItem]:
                 )
             )
 
-    if "allergies" in state.unknowns:
+    if "allergies" in state.unknowns and "allergies" not in asked:
         items.append(
             MissingInfoItem(field="allergies", category="medication_allergy_safety", prompt_hint="about any known drug allergies")
         )
-    if "current_medications" in state.unknowns:
+    if "current_medications" in state.unknowns and "current_medications" not in asked:
         items.append(
             MissingInfoItem(
                 field="current_medications",
@@ -106,7 +107,7 @@ def identify_missing_info(state: PatientState) -> list[MissingInfoItem]:
             )
         )
 
-    if "known_conditions" in state.unknowns:
+    if "known_conditions" in state.unknowns and "known_conditions" not in asked:
         items.append(
             MissingInfoItem(
                 field="known_conditions",
@@ -116,7 +117,7 @@ def identify_missing_info(state: PatientState) -> list[MissingInfoItem]:
         )
 
     for field, hint in _DEMOGRAPHIC_HINTS.items():
-        if field in state.unknowns:
+        if field in state.unknowns and field not in asked:
             items.append(MissingInfoItem(field=field, category="lower_priority_context", prompt_hint=hint))
 
     items = [item for item in items if _passes_pre_question_checks(item, state)]

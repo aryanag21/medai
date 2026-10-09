@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_patient, get_owned_conversation
 from app.conversation.manager import generate_reply
-from app.db.models import Message, Patient
+from app.db.models import Allergy, CurrentMedication, MedicalHistory, Message, Patient, Symptom
 from app.db.session import get_db
 from app.patient_state.assembler import build_patient_state
 from app.providers.embeddings import EmbeddingProvider, get_embedding_provider
@@ -39,12 +39,69 @@ async def send_message(
 
     conversation = await get_owned_conversation(db, patient, payload.conversation_id)
 
+    # 1. Fetch prior messages to check what the assistant previously asked
+    prior_messages = (
+        await db.execute(
+            select(Message)
+            .where(Message.conversation_id == conversation.id)
+            .order_by(Message.created_at)
+        )
+    ).scalars().all()
+
+    assistant_history = [m.content for m in prior_messages if m.role == "assistant"]
+    last_question = assistant_history[-1].lower() if assistant_history else ""
+
+    content_cleaned = payload.content.strip()
+    content_lower = content_cleaned.lower()
+    negative_words = {
+        "no", "none", "no allergies", "nil", "n/a", "na", "nothing", "nope",
+        "i have no allergies", "i don't have any", "i dont have any", "never",
+        "not that i know of", "zero", "no medications", "no history", "no conditions",
+    }
+    is_negative = content_lower in negative_words or any(
+        content_lower.startswith(w)
+        for w in ["none", "no allergies", "no medications", "no history", "no conditions", "i don't have", "i dont have", "nothing"]
+    )
+
+    # If the previous question asked about allergies
+    if "allerg" in last_question:
+        if not is_negative:
+            substance = content_cleaned
+            if "allergic to" in substance.lower():
+                substance = substance.lower().split("allergic to")[-1].strip(". ,")
+            if substance:
+                db.add(Allergy(patient_id=patient.id, substance=substance, severity="user_reported"))
+
+    # If the previous question asked about medications
+    elif "medicat" in last_question or "medicine" in last_question or "taking" in last_question:
+        if not is_negative:
+            db.add(CurrentMedication(patient_id=patient.id, name=content_cleaned))
+
+    # If the previous question asked about medical history or conditions
+    elif "history" in last_question or "condition" in last_question or "ongoing" in last_question:
+        if not is_negative:
+            db.add(MedicalHistory(patient_id=patient.id, condition=content_cleaned, status="active"))
+
     user_message = Message(conversation_id=conversation.id, role="user", content=payload.content)
     db.add(user_message)
     await db.flush()
 
+    # Symptom extraction: extract symptoms on early turns if none exist
+    try:
+        existing_symptoms = (
+            await db.execute(select(Symptom).where(Symptom.patient_id == patient.id))
+        ).scalars().all()
+        if not existing_symptoms and len(prior_messages) == 0:
+            from app.patient_state.extraction import extract_symptoms_from_conversation
+            extracted = await extract_symptoms_from_conversation(llm, [payload.content])
+            for s in extracted:
+                db.add(Symptom(patient_id=patient.id, conversation_id=conversation.id, **s.model_dump()))
+            await db.flush()
+    except Exception:
+        pass
+
     state = await build_patient_state(db, patient)
-    reply_text = await generate_reply(llm, state)
+    reply_text = await generate_reply(llm, state, past_assistant_messages=assistant_history)
 
     is_assessment = False
     assessment_status: str | None = None
