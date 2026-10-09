@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_patient, get_owned_conversation
 from app.conversation.manager import generate_reply
-from app.db.models import Allergy, CurrentMedication, MedicalHistory, Message, Patient, Symptom
+from app.db.models import Allergy, CurrentMedication, MedicalHistory, Message, Patient, PatientProfile, Symptom
 from app.db.session import get_db
 from app.patient_state.assembler import build_patient_state
 from app.providers.embeddings import EmbeddingProvider, get_embedding_provider
@@ -63,62 +63,90 @@ async def send_message(
         for w in ["none", "no allergies", "no medications", "no history", "no conditions", "i don't have", "i dont have", "nothing"]
     )
 
+    is_symptom_statement = any(
+        w in content_lower
+        for w in ["cough", "cold", "fever", "pain", "headache", "throat", "nausea", "dizzy", "breathe", "breathing", "hurts", "ache", "chills", "feeling", "sick"]
+    )
+
     # If the previous question asked about allergies
-    if "allerg" in last_question:
+    if "allerg" in last_question and not is_symptom_statement:
         if not is_negative:
             substance = content_cleaned
             if "allergic to" in substance.lower():
                 substance = substance.lower().split("allergic to")[-1].strip(". ,")
-            if substance:
+            if substance and len(substance) < 80:
                 db.add(Allergy(patient_id=patient.id, substance=substance, severity="user_reported"))
 
     # If the previous question asked about medications
-    elif "medicat" in last_question or "medicine" in last_question or "taking" in last_question:
-        if not is_negative:
+    elif ("medicat" in last_question or "medicine" in last_question or "taking" in last_question) and not is_symptom_statement:
+        if not is_negative and len(content_cleaned) < 80:
             db.add(CurrentMedication(patient_id=patient.id, name=content_cleaned))
 
     # If the previous question asked about medical history or conditions
-    elif "history" in last_question or "condition" in last_question or "ongoing" in last_question:
-        if not is_negative:
+    elif ("history" in last_question or "condition" in last_question or "ongoing" in last_question) and not is_symptom_statement:
+        if not is_negative and len(content_cleaned) < 120:
             db.add(MedicalHistory(patient_id=patient.id, condition=content_cleaned, status="active"))
+
+    # Update profile fields if user answered demographic questions
+    profile = await db.get(PatientProfile, patient.id)
+    if profile is None:
+        profile = PatientProfile(patient_id=patient.id)
+        db.add(profile)
+
+    if "age" in last_question or "how old" in last_question:
+        import re
+        match = re.search(r"\b(\d{1,3})\b", content_cleaned)
+        if match:
+            profile.age = int(match.group(1))
+    elif "sex" in last_question or "gender" in last_question:
+        if "male" in content_lower and "female" not in content_lower:
+            profile.sex = "male"
+        elif "female" in content_lower:
+            profile.sex = "female"
+        elif content_lower in ["other", "non-binary"]:
+            profile.sex = content_cleaned
+    elif "height" in last_question:
+        import re
+        match = re.search(r"(\d+(\.\d+)?)", content_cleaned)
+        if match:
+            profile.height_cm = float(match.group(1))
+    elif "weight" in last_question:
+        import re
+        match = re.search(r"(\d+(\.\d+)?)", content_cleaned)
+        if match:
+            profile.weight_kg = float(match.group(1))
 
     user_message = Message(conversation_id=conversation.id, role="user", content=payload.content)
     db.add(user_message)
     await db.flush()
 
-    # Symptom extraction: extract symptoms on early turns if none exist
+    # Extract symptoms on any turn to keep clinical state up to date
     try:
-        existing_symptoms = (
-            await db.execute(select(Symptom).where(Symptom.patient_id == patient.id))
-        ).scalars().all()
-        if not existing_symptoms and len(prior_messages) == 0:
-            from app.patient_state.extraction import extract_symptoms_from_conversation
-            extracted = await extract_symptoms_from_conversation(llm, [payload.content])
-            for s in extracted:
+        from app.patient_state.extraction import extract_symptoms_from_conversation
+        extracted = await extract_symptoms_from_conversation(llm, [payload.content])
+        for s in extracted:
+            existing = await db.execute(
+                select(Symptom).where(
+                    Symptom.patient_id == patient.id,
+                    Symptom.symptom == s.symptom,
+                )
+            )
+            if not existing.scalar_one_or_none():
                 db.add(Symptom(patient_id=patient.id, conversation_id=conversation.id, **s.model_dump()))
-            await db.flush()
+        await db.flush()
     except Exception:
         pass
 
     state = await build_patient_state(db, patient)
-    reply_text = await generate_reply(llm, state, past_assistant_messages=assistant_history)
+    history = [{"role": m.role, "content": m.content} for m in prior_messages]
 
-    is_assessment = False
-    assessment_status: str | None = None
-    escalation: str | None = None
-
-    if reply_text is None:
-        evidence_package = await build_evidence_package(db, patient, embedding_provider, vector_store)
-        vitals = vitals_from_patient_state(evidence_package.patient_state.vitals)
-        safety_evaluation = await evaluate_safety(db, patient_id=patient.id, vitals=vitals)
-        assessment = await get_validated_output(llm, evidence_package, safety_evaluation)
-
-        reply_text = assessment.summary
-        if assessment.escalation:
-            reply_text = f"{reply_text}\n\n{assessment.escalation}"
-        is_assessment = True
-        assessment_status = assessment.status
-        escalation = assessment.escalation
+    from app.conversation.clinical_engine import generate_conversational_reply
+    reply_text, is_assessment, assessment_status, escalation = await generate_conversational_reply(
+        llm=llm,
+        state=state,
+        latest_message=payload.content,
+        conversation_history=history,
+    )
 
     assistant_message = Message(conversation_id=conversation.id, role="assistant", content=reply_text)
     db.add(assistant_message)
