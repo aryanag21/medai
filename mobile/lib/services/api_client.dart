@@ -1,10 +1,8 @@
 import 'dart:convert';
-import 'dart:io' show Platform;
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart' show kIsWeb;
-import 'package:http/http.dart' as http;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
 
 /// Talks to the MEDAI backend (see backend/app/api/*.py).
@@ -17,26 +15,61 @@ import 'package:uuid/uuid.dart';
 class ApiClient {
   ApiClient({String? baseUrl}) : baseUrl = baseUrl ?? _activeBaseUrl;
 
-  static const String _defaultBaseUrl = 'https://dvds-canvas-testament-milk.trycloudflare.com';
+  static const String _defaultBaseUrl = 'https://cia-kathy-travelers-distributor.trycloudflare.com';
   static String _activeBaseUrl = _defaultBaseUrl;
   static const _serverUrlKey = 'medai_server_url';
+
+  static String get defaultBaseUrl => _defaultBaseUrl;
+  static String get activeBaseUrl => _activeBaseUrl;
 
   /// Reads any custom server URL saved in secure storage, updating _activeBaseUrl.
   static Future<String> getServerUrl() async {
     const storage = FlutterSecureStorage();
     final saved = await storage.read(key: _serverUrlKey);
     if (saved != null && saved.trim().isNotEmpty) {
-      _activeBaseUrl = saved.trim().replaceAll(RegExp(r'/+$'), '');
+      final trimmed = saved.trim().replaceAll(RegExp(r'/+$'), '');
+      // If the saved URL is a stale tunnel URL or emulator default, reset to the current active default.
+      if (trimmed == 'https://dvds-canvas-testament-milk.trycloudflare.com' ||
+          trimmed == 'http://10.0.2.2:8000' ||
+          trimmed == 'http://localhost:8000') {
+        _activeBaseUrl = _defaultBaseUrl;
+        await storage.write(key: _serverUrlKey, value: _defaultBaseUrl);
+      } else {
+        _activeBaseUrl = trimmed;
+      }
+    } else {
+      _activeBaseUrl = _defaultBaseUrl;
     }
     return _activeBaseUrl;
   }
 
   /// Sets and persists a new server URL.
   static Future<void> setServerUrl(String url) async {
-    final cleaned = url.trim().replaceAll(RegExp(r'/+$'), '');
+    var cleaned = url.trim();
+    if (cleaned.isNotEmpty && !cleaned.startsWith('http://') && !cleaned.startsWith('https://')) {
+      cleaned = 'https://$cleaned';
+    }
+    cleaned = cleaned.replaceAll(RegExp(r'/+$'), '');
     _activeBaseUrl = cleaned.isNotEmpty ? cleaned : _defaultBaseUrl;
     const storage = FlutterSecureStorage();
     await storage.write(key: _serverUrlKey, value: _activeBaseUrl);
+  }
+
+  /// Tests connectivity to the backend health endpoint.
+  static Future<bool> testConnection([String? testUrl]) async {
+    try {
+      var target = (testUrl ?? _activeBaseUrl).trim();
+      if (!target.startsWith('http://') && !target.startsWith('https://')) {
+        target = 'https://$target';
+      }
+      target = target.replaceAll(RegExp(r'/+$'), '');
+      final response = await http
+          .get(Uri.parse('$target/healthz'))
+          .timeout(const Duration(seconds: 6));
+      return response.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
   }
 
   final String baseUrl;
@@ -195,6 +228,50 @@ class ApiClient {
       throw ApiException('failed to fetch assessment speech: ${response.statusCode} ${response.body}');
     }
     return response.bodyBytes;
+  }
+
+  /// Records a manual vital measurement directly to POST /vitals (backend/app/api/vitals.py).
+  Future<Map<String, dynamic>> addVital({
+    required String type,
+    required double value,
+    required String unit,
+    DateTime? timestamp,
+  }) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/vitals'),
+      headers: await _authHeaders(),
+      body: jsonEncode({
+        'type': type,
+        'value': value,
+        'unit': unit,
+        if (timestamp != null) 'timestamp': timestamp.toUtc().toIso8601String(),
+      }),
+    );
+    if (response.statusCode != 201) {
+      String detail;
+      try {
+        final decoded = jsonDecode(response.body);
+        detail = decoded is Map && decoded.containsKey('detail')
+            ? decoded['detail'].toString()
+            : response.body;
+      } catch (_) {
+        detail = response.body;
+      }
+      throw ApiException('Failed to record vital: $detail');
+    }
+    return jsonDecode(response.body) as Map<String, dynamic>;
+  }
+
+  /// Fetches current patient vitals from GET /vitals (backend/app/api/vitals.py).
+  Future<List<Map<String, dynamic>>> getVitals() async {
+    final response = await http.get(
+      Uri.parse('$baseUrl/vitals'),
+      headers: await _authHeaders(),
+    );
+    if (response.statusCode != 200) {
+      throw ApiException('Failed to fetch vitals: ${response.statusCode}');
+    }
+    return (jsonDecode(response.body) as List).cast<Map<String, dynamic>>();
   }
 }
 

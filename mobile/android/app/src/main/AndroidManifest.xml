@@ -6,12 +6,21 @@
     <!-- Phase 10: Health Connect read permissions, one per vital_system.initial_measurements
          type HealthConnectAdapter reads (mobile/lib/services/health_connect_adapter.dart).
          Read-only — MEDAI never writes to Health Connect, so no WRITE_* permissions. -->
+    <!-- Android 14+ (System Health Connect) -->
     <uses-permission android:name="android.permission.health.READ_HEART_RATE"/>
     <uses-permission android:name="android.permission.health.READ_OXYGEN_SATURATION"/>
     <uses-permission android:name="android.permission.health.READ_BLOOD_PRESSURE"/>
     <uses-permission android:name="android.permission.health.READ_BODY_TEMPERATURE"/>
     <uses-permission android:name="android.permission.health.READ_RESPIRATORY_RATE"/>
     <uses-permission android:name="android.permission.health.READ_WEIGHT"/>
+
+    <!-- Android 13 and below (Standalone Health Connect APK) -->
+    <uses-permission android:name="androidx.health.permission.HEART_RATE_READ"/>
+    <uses-permission android:name="androidx.health.permission.OXYGEN_SATURATION_READ"/>
+    <uses-permission android:name="androidx.health.permission.BLOOD_PRESSURE_READ"/>
+    <uses-permission android:name="androidx.health.permission.BODY_TEMPERATURE_READ"/>
+    <uses-permission android:name="androidx.health.permission.RESPIRATORY_RATE_READ"/>
+    <uses-permission android:name="androidx.health.permission.WEIGHT_READ"/>
 
     <application
         android:label="medai"

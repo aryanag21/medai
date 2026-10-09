@@ -84,8 +84,14 @@ class HealthConnectAdapter {
 
   Future<void> _ensureAvailable() async {
     final status = await _health.getHealthConnectSdkStatus();
+    if (status == HealthConnectSdkStatus.sdkUnavailableProviderUpdateRequired) {
+      try {
+        await _health.installHealthConnect();
+      } catch (_) {}
+      throw HealthConnectUnavailable('Health Connect update required. Please install or update it from Google Play.');
+    }
     if (status != HealthConnectSdkStatus.sdkAvailable) {
-      throw HealthConnectUnavailable('DEVICE_ERROR: Health Connect status is ${status?.name ?? 'unknown'}');
+      throw HealthConnectUnavailable('Health Connect is unavailable on this device (${status?.name ?? 'unknown'}).');
     }
   }
 

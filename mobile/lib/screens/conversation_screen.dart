@@ -3,6 +3,7 @@ import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import '../services/api_client.dart';
 import '../services/speech_playback_service.dart';
+import 'manual_vitals_screen.dart';
 
 class ChatEntry {
   ChatEntry({required this.role, required this.text, this.isAssessment = false});
@@ -249,7 +250,20 @@ class _ConversationScreenState extends State<ConversationScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Talk to Health AI')),
+      appBar: AppBar(
+        title: const Text('Talk to Health AI'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.monitor_heart_outlined),
+            tooltip: 'Enter/View Vitals',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => ManualVitalsScreen(apiClient: _apiClient),
+              ),
+            ),
+          ),
+        ],
+      ),
       body: Column(
         children: [
           if (_error != null)

@@ -48,6 +48,29 @@ class FakeApiClient extends ApiClient {
     if (assessmentSpeechError != null) throw assessmentSpeechError!;
     return Uint8List.fromList([1, 2, 3]);
   }
+
+  final recordedVitals = <Map<String, dynamic>>[];
+  List<Map<String, dynamic>> vitalsToReturn = [];
+
+  @override
+  Future<Map<String, dynamic>> addVital({
+    required String type,
+    required double value,
+    required String unit,
+    DateTime? timestamp,
+  }) async {
+    final entry = {
+      'type': type,
+      'value': value,
+      'unit': unit,
+      'timestamp': (timestamp ?? DateTime.now()).toIso8601String(),
+    };
+    recordedVitals.add(entry);
+    return entry;
+  }
+
+  @override
+  Future<List<Map<String, dynamic>>> getVitals() async => vitalsToReturn;
 }
 
 class FakeAudioBackend implements AudioBackend {
