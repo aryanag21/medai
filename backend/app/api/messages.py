@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_patient, get_owned_conversation
 from app.conversation.manager import generate_reply
-from app.db.models import Allergy, CurrentMedication, MedicalHistory, Message, Patient, PatientProfile, Symptom
+from app.db.models import Allergy, Conversation, CurrentMedication, MedicalHistory, Message, Patient, PatientProfile, Symptom
 from app.db.session import get_db
 from app.patient_state.assembler import build_patient_state
 from app.providers.embeddings import EmbeddingProvider, get_embedding_provider
@@ -53,6 +53,38 @@ async def send_message(
 
     content_cleaned = payload.content.strip()
     content_lower = content_cleaned.lower()
+
+    # Chat clearing / new conversation trigger without requiring mobile app updates
+    clear_keywords = {"clear", "clear chat", "/clear", "reset", "start over", "new chat", "new conversation", "restart"}
+    if content_lower in clear_keywords:
+        from sqlalchemy import delete
+        await db.execute(delete(Message).where(Message.conversation_id == conversation.id))
+        await db.execute(delete(Symptom).where(Symptom.conversation_id == conversation.id))
+
+        new_conv = Conversation(patient_id=patient.id)
+        db.add(new_conv)
+        await db.flush()
+
+        user_msg = Message(conversation_id=conversation.id, role="user", content=payload.content)
+        fresh_msg = Message(
+            conversation_id=conversation.id,
+            role="assistant",
+            content="✨ Chat cleared! I'm ready for a fresh consultation. (To see a clean empty screen, you can also back out to Home and tap 'Talk to Health AI'). What symptoms or questions would you like to discuss today?",
+        )
+        db.add(user_msg)
+        db.add(fresh_msg)
+        await db.commit()
+        await db.refresh(user_msg)
+        await db.refresh(fresh_msg)
+
+        return MessageExchangeResponse(
+            user_message=user_msg,
+            assistant_message=fresh_msg,
+            is_assessment=False,
+            assessment_status=None,
+            escalation=None,
+        )
+
     negative_words = {
         "no", "none", "no allergies", "nil", "n/a", "na", "nothing", "nope",
         "i have no allergies", "i don't have any", "i dont have any", "never",
