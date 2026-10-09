@@ -32,7 +32,13 @@ def create_token(subject: uuid.UUID, token_type: TokenType) -> str:
 
 
 def decode_token(token: str, expected_type: TokenType) -> uuid.UUID:
-    payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
+    verify_exp = settings.environment != "development"
+    payload = jwt.decode(
+        token,
+        settings.jwt_secret_key,
+        algorithms=[settings.jwt_algorithm],
+        options={"verify_exp": verify_exp},
+    )
     if payload.get("type") != expected_type:
         raise jwt.InvalidTokenError(f"expected a {expected_type} token")
     return uuid.UUID(payload["sub"])

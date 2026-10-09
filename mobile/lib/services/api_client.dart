@@ -117,8 +117,26 @@ class ApiClient {
     return {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'};
   }
 
+  Future<http.Response> _authedGet(Uri uri) async {
+    var response = await http.get(uri, headers: await _authHeaders());
+    if (response.statusCode == 401) {
+      await _storage.delete(key: _accessTokenKey);
+      response = await http.get(uri, headers: await _authHeaders());
+    }
+    return response;
+  }
+
+  Future<http.Response> _authedPost(Uri uri, {Object? body}) async {
+    var response = await http.post(uri, headers: await _authHeaders(), body: body);
+    if (response.statusCode == 401) {
+      await _storage.delete(key: _accessTokenKey);
+      response = await http.post(uri, headers: await _authHeaders(), body: body);
+    }
+    return response;
+  }
+
   Future<String> createConversation() async {
-    final response = await http.post(Uri.parse('$baseUrl/conversations'), headers: await _authHeaders());
+    final response = await _authedPost(Uri.parse('$baseUrl/conversations'));
     if (response.statusCode != 201) {
       throw ApiException('failed to create conversation: ${response.statusCode} ${response.body}');
     }
@@ -128,7 +146,7 @@ class ApiClient {
   /// ux.session_auto_preserved / resume_previous_consultation — ordered newest-first by the
   /// backend (backend/app/api/conversations.py), so `.first` is "the conversation to resume".
   Future<List<Map<String, dynamic>>> listConversations() async {
-    final response = await http.get(Uri.parse('$baseUrl/conversations'), headers: await _authHeaders());
+    final response = await _authedGet(Uri.parse('$baseUrl/conversations'));
     if (response.statusCode != 200) {
       throw ApiException('failed to list conversations: ${response.statusCode} ${response.body}');
     }
@@ -136,9 +154,8 @@ class ApiClient {
   }
 
   Future<List<Map<String, dynamic>>> listMessages({required String conversationId}) async {
-    final response = await http.get(
+    final response = await _authedGet(
       Uri.parse('$baseUrl/messages').replace(queryParameters: {'conversation_id': conversationId}),
-      headers: await _authHeaders(),
     );
     if (response.statusCode != 200) {
       throw ApiException('failed to list messages: ${response.statusCode} ${response.body}');
@@ -153,9 +170,8 @@ class ApiClient {
   /// distinguishes the two so the UI can offer TTS playback and, for a high-risk result, a
   /// confirmation prompt (ux.confirmation_required_when: high_risk_recommendation_considered).
   Future<SendMessageResult> sendMessage({required String conversationId, required String content}) async {
-    final response = await http.post(
+    final response = await _authedPost(
       Uri.parse('$baseUrl/messages'),
-      headers: await _authHeaders(),
       body: jsonEncode({'conversation_id': conversationId, 'content': content}),
     );
     if (response.statusCode != 201) {
@@ -173,9 +189,8 @@ class ApiClient {
   /// Registers a device (see backend/app/api/devices.py) and returns its id. Used by
   /// HealthSyncService to get a device_id to sync Health Connect readings under.
   Future<String> registerDevice({required String deviceType, String? label}) async {
-    final response = await http.post(
+    final response = await _authedPost(
       Uri.parse('$baseUrl/devices'),
-      headers: await _authHeaders(),
       body: jsonEncode(
         label != null
             ? {'device_type': deviceType, 'label': label}
@@ -189,7 +204,7 @@ class ApiClient {
   }
 
   Future<List<Map<String, dynamic>>> listDevices() async {
-    final response = await http.get(Uri.parse('$baseUrl/devices'), headers: await _authHeaders());
+    final response = await _authedGet(Uri.parse('$baseUrl/devices'));
     if (response.statusCode != 200) {
       throw ApiException('failed to list devices: ${response.statusCode} ${response.body}');
     }
@@ -202,9 +217,8 @@ class ApiClient {
     required String deviceId,
     required List<Map<String, dynamic>> readings,
   }) async {
-    final response = await http.post(
+    final response = await _authedPost(
       Uri.parse('$baseUrl/vitals/sync'),
-      headers: await _authHeaders(),
       body: jsonEncode({'device_id': deviceId, 'readings': readings}),
     );
     if (response.statusCode != 200) {
@@ -219,9 +233,8 @@ class ApiClient {
   /// a 503 here (TTS engine unavailable) must never prevent the text response — already shown
   /// via [sendMessage] — from being available.
   Future<Uint8List> fetchAssessmentSpeech({required String conversationId}) async {
-    final response = await http.post(
+    final response = await _authedPost(
       Uri.parse('$baseUrl/assessment/speech'),
-      headers: await _authHeaders(),
       body: jsonEncode({'conversation_id': conversationId}),
     );
     if (response.statusCode != 200) {
@@ -237,9 +250,8 @@ class ApiClient {
     required String unit,
     DateTime? timestamp,
   }) async {
-    final response = await http.post(
+    final response = await _authedPost(
       Uri.parse('$baseUrl/vitals'),
-      headers: await _authHeaders(),
       body: jsonEncode({
         'type': type,
         'value': value,
@@ -264,10 +276,7 @@ class ApiClient {
 
   /// Fetches current patient vitals from GET /vitals (backend/app/api/vitals.py).
   Future<List<Map<String, dynamic>>> getVitals() async {
-    final response = await http.get(
-      Uri.parse('$baseUrl/vitals'),
-      headers: await _authHeaders(),
-    );
+    final response = await _authedGet(Uri.parse('$baseUrl/vitals'));
     if (response.statusCode != 200) {
       throw ApiException('Failed to fetch vitals: ${response.statusCode}');
     }

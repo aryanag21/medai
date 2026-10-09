@@ -34,7 +34,7 @@ class Settings(BaseSettings):
 
     jwt_secret_key: str = _DEV_DEFAULT_JWT_SECRET_KEY
     jwt_algorithm: str = "HS256"
-    jwt_access_token_expire_minutes: int = 15
+    jwt_access_token_expire_minutes: int = 525600
     jwt_refresh_token_expire_days: int = 7
 
     # Application-level field encryption key for sensitive columns (Fernet key).
