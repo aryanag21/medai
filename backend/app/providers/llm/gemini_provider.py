@@ -40,47 +40,53 @@ class GeminiProvider(LLMProvider):
 
     async def generate(self, prompt: str, *, system: str | None = None) -> str:
         client = self._require_client()
-        # 1. Try standard models.generate_content (Google AI Studio Developer API)
-        try:
-            config = None
-            if system:
-                from google.genai import types
-                config = types.GenerateContentConfig(system_instruction=system)
-            response = await client.aio.models.generate_content(
-                model=self._model, contents=prompt, config=config
-            )
-            return response.text or ""
-        except Exception:
-            # 2. Fallback to interactions.create if models API fails
-            interaction = await client.aio.interactions.create(
-                model=self._model, input=prompt, system_instruction=system, timeout=_REQUEST_TIMEOUT_SECONDS
-            )
-            return interaction.output_text or ""
+        candidate_models = [self._model] + [m for m in ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash"] if m != self._model]
+
+        last_exc: Exception | None = None
+        for model_id in candidate_models:
+            try:
+                config = None
+                if system:
+                    from google.genai import types
+                    config = types.GenerateContentConfig(system_instruction=system)
+                response = await client.aio.models.generate_content(
+                    model=model_id, contents=prompt, config=config
+                )
+                if response.text:
+                    return response.text
+            except Exception as e:
+                last_exc = e
+                continue
+
+        if last_exc:
+            raise last_exc
+        return ""
 
     async def structured_generate(self, prompt: str, schema: type[T], *, system: str | None = None) -> T:
         client = self._require_client()
-        # 1. Try standard models.generate_content with structured response
-        try:
-            from google.genai import types
-            config = types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=schema,
-                system_instruction=system,
-            )
-            response = await client.aio.models.generate_content(
-                model=self._model, contents=prompt, config=config
-            )
-            return schema.model_validate_json(response.text)
-        except Exception:
-            # 2. Fallback to interactions.create
-            interaction = await client.aio.interactions.create(
-                model=self._model,
-                input=prompt,
-                system_instruction=system,
-                response_format={"type": "text", "mime_type": "application/json", "schema_": schema.model_json_schema()},
-                timeout=_REQUEST_TIMEOUT_SECONDS,
-            )
-            return schema.model_validate_json(interaction.output_text)
+        candidate_models = [self._model] + [m for m in ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash"] if m != self._model]
+
+        last_exc: Exception | None = None
+        for model_id in candidate_models:
+            try:
+                from google.genai import types
+                config = types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                    system_instruction=system,
+                )
+                response = await client.aio.models.generate_content(
+                    model=model_id, contents=prompt, config=config
+                )
+                if response.text:
+                    return schema.model_validate_json(response.text)
+            except Exception as e:
+                last_exc = e
+                continue
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("structured_generate produced no output")
 
     async def stream(self, prompt: str, *, system: str | None = None) -> AsyncIterator[str]:
         client = self._require_client()
