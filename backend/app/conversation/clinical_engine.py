@@ -38,10 +38,15 @@ def format_vitals_summary(vitals: dict[str, Any]) -> str:
     if "oxygen_saturation" in vitals:
         spo2 = int(vitals["oxygen_saturation"]["value"])
         parts.append(f"SpO2: {spo2}%")
-    if "temperature" in vitals:
-        temp = vitals["temperature"]["value"]
-        unit = vitals["temperature"].get("unit", "F")
+    if "body_temperature" in vitals or "temperature" in vitals:
+        temp_obj = vitals.get("body_temperature") or vitals.get("temperature")
+        temp = temp_obj["value"]
+        unit = temp_obj.get("unit", "F")
         parts.append(f"Temp: {temp}°{unit}")
+    if "weight" in vitals:
+        wt = vitals["weight"]["value"]
+        unit = vitals["weight"].get("unit", "kg")
+        parts.append(f"Weight: {wt} {unit}")
     if "blood_pressure_systolic" in vitals and "blood_pressure_diastolic" in vitals:
         sys = int(vitals["blood_pressure_systolic"]["value"])
         dia = int(vitals["blood_pressure_diastolic"]["value"])
