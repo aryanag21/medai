@@ -275,6 +275,7 @@ async def generate_conversational_reply(
     state: PatientState,
     latest_message: str,
     conversation_history: list[dict[str, str]],
+    db: Any | None = None,
 ) -> tuple[str, bool, str | None, str | None]:
     """Generates a concise, natural, human-sounding conversational clinical response."""
 
@@ -285,31 +286,47 @@ async def generate_conversational_reply(
         reply = generate_emergency_response(latest_message)
         return reply, True, "emergency", emergency_reason
 
-    # 2. Known patient context for prompt
+    # 2. Vital trends & Anomaly alerts
+    trends_line = ""
+    if db is not None and getattr(state.patient, "id", None):
+        try:
+            from app.vitals.trends import calculate_vital_trends, format_trends_summary
+            trends_data = await calculate_vital_trends(db, state.patient.id, window_hours=24)
+            trends_summary = format_trends_summary(trends_data)
+            if trends_summary:
+                trends_line = f"• 24h Vitals Trends & Anomaly Alerts from Connected Wearables:\n{trends_summary}\n"
+        except Exception as e:
+            logger.warning("Could not calculate vital trends for prompt: %s", e)
+
+    # 3. Known patient context for prompt
     vitals_text = format_vitals_summary(state.vitals)
-    vitals_line = f"• Recorded Vitals from App: {vitals_text}\n" if vitals_text else ""
+    vitals_line = f"• Current Recorded Vitals: {vitals_text}\n" if vitals_text else ""
     allergies_str = ", ".join(a.substance for a in state.allergies)
     allergies_line = f"• Known Allergies: {allergies_str}\n" if allergies_str else ""
     meds_str = ", ".join(m.name for m in state.medications)
     meds_line = f"• Current Medications: {meds_str}\n" if meds_str else ""
 
     system_prompt = (
-        "You are MEDAI, a warm, concise, and helpful clinical AI assistant.\n"
-        "You speak naturally and conversationally, like a friendly and knowledgeable doctor.\n\n"
-        f"{vitals_line}{allergies_line}{meds_line}\n"
-        "CRITICAL CONVERSATIONAL GUIDELINES:\n"
-        "1. BE CONCISE & HUMAN: Write 2 to 3 short paragraphs max (under 160 words). Avoid long-winded essays, walls of bullet points, or robotic section headers.\n"
-        "2. FOCUS DIRECTLY ON WHAT THE PATIENT JUST SAID: If the patient talks about an injury (like slamming their foot into a door), address that trauma immediately with R.I.C.E. and pain relief! Do NOT repeat old advice about unrelated symptoms from earlier messages.\n"
-        "3. CALM, REASSURING TONE: Do not use alarmist language, screaming siren emojis, or aggressive all-caps headers.\n"
-        "4. PRACTICAL RELIEF: Offer 1-2 practical OTC remedies with clear adult doses (e.g., Ibuprofen 400mg with food or Paracetamol 500mg) and simple home care.\n"
-        "5. NEVER ASK FOR VITALS IN CHAT: Vitals are managed in the app. If vitals are recorded above, reference them gently if relevant.\n"
-        "6. CLOSE WITH A GENTLE QUESTION: Ask 1 short, natural follow-up question."
+        "You are MEDAI, a warm, highly empathetic, and exceptionally clear clinical AI physician.\n"
+        "You speak naturally and conversationally, like a trusted doctor having a direct consultation with a patient.\n\n"
+        f"{vitals_line}{trends_line}{allergies_line}{meds_line}\n"
+        "CRITICAL CLINICAL & CONVERSATIONAL RULES:\n"
+        "1. DYNAMIC FOCUS ON LATEST COMPLAINT: Always prioritize what the patient is asking RIGHT NOW in their latest message. "
+        "If the patient changes the topic (e.g. from a cough or injury to trouble sleeping, fever, stomach upset, or back pain), IMMEDIATELY pivot to the new problem. "
+        "NEVER bring up or fixate on older historical symptoms (like an old foot injury, cough, or bruise from earlier) unless the patient explicitly connects them!\n"
+        "2. EXTREME BREVITY & SCANNABILITY: Keep responses strictly between 90 and 130 words (2 to 3 short, breezy paragraphs max). "
+        "Use generous whitespace and bold highlights for medicine names and doses. Never write dense, overwhelming walls of text.\n"
+        "3. NATURAL & EMPATHETIC HUMAN TONE: Open with a warm, caring sentence acknowledging their immediate situation. Speak calmly and practically.\n"
+        "4. PRACTICAL RELIEF: Provide 1-2 practical, safe over-the-counter remedies with clear adult doses and actionable lifestyle/home steps.\n"
+        "5. VITAL TRENDS & EXTREME ALERTS: If wearable trends or extreme alerts are noted above (like a drop in SpO2 or elevated resting heart rate), address them with appropriate clinical caution.\n"
+        "6. NEVER ASK FOR VITALS IN CHAT: Vitals are automatically synced by the app.\n"
+        "7. CLOSE WITH ONE SHORT QUESTION: End with exactly one gentle, relevant follow-up question."
     )
 
     # 3. Try LLM generation
     try:
         history_lines = []
-        for msg in conversation_history[-6:]:
+        for msg in conversation_history[-4:]:
             role = "Patient" if msg.get("role") == "user" else "Assistant"
             history_lines.append(f"{role}: {msg.get('content', '')}")
         history_lines.append(f"Patient: {latest_message}")

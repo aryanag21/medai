@@ -213,16 +213,67 @@ class ApiClient {
 
   /// Sends a batch of already-normalized readings to POST /vitals/sync
   /// (backend/app/api/vitals.py) and returns the per-reading accept/reject outcome.
+  /// Automatically chunks batches larger than 200 items to prevent socket drops and payload timeouts.
   Future<Map<String, dynamic>> syncVitals({
     required String deviceId,
     required List<Map<String, dynamic>> readings,
   }) async {
-    final response = await _authedPost(
-      Uri.parse('$baseUrl/vitals/sync'),
-      body: jsonEncode({'device_id': deviceId, 'readings': readings}),
+    if (readings.isEmpty) {
+      return {'synced': 0, 'accepted': 0, 'rejected': 0, 'results': []};
+    }
+
+    const chunkSize = 200;
+    int totalSynced = 0;
+    int totalAccepted = 0;
+    int totalRejected = 0;
+    final allResults = <Map<String, dynamic>>[];
+
+    for (var i = 0; i < readings.length; i += chunkSize) {
+      final chunk = readings.sublist(i, (i + chunkSize).clamp(0, readings.length));
+      final response = await _authedPost(
+        Uri.parse('$baseUrl/vitals/sync'),
+        body: jsonEncode({'device_id': deviceId, 'readings': chunk}),
+      );
+      if (response.statusCode != 200) {
+        throw ApiException('failed to sync vitals chunk: ${response.statusCode} ${response.body}');
+      }
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      totalSynced += (body['synced'] as int? ?? 0);
+      totalAccepted += (body['accepted'] as int? ?? 0);
+      totalRejected += (body['rejected'] as int? ?? 0);
+      if (body['results'] is List) {
+        allResults.addAll((body['results'] as List).cast<Map<String, dynamic>>());
+      }
+    }
+
+    return {
+      'synced': totalSynced,
+      'accepted': totalAccepted,
+      'rejected': totalRejected,
+      'results': allResults,
+    };
+  }
+
+  /// Fetches the latest recorded sync timestamp from the server so we only sync new data.
+  Future<DateTime?> getLatestSyncTimestamp() async {
+    try {
+      final response = await _authedGet(Uri.parse('$baseUrl/vitals/sync/latest'));
+      if (response.statusCode == 200) {
+        final body = jsonDecode(response.body) as Map<String, dynamic>;
+        final ts = body['latest_timestamp'] as String?;
+        if (ts != null) return DateTime.tryParse(ts);
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Fetches 24-hour vital trends, min/max/avg, and extreme anomaly alerts
+  Future<Map<String, dynamic>> getVitalTrends({int windowHours = 24}) async {
+    final response = await _authedGet(
+      Uri.parse('$baseUrl/vitals/trends').replace(queryParameters: {'window_hours': windowHours.toString()}),
     );
     if (response.statusCode != 200) {
-      throw ApiException('failed to sync vitals: ${response.statusCode} ${response.body}');
+      throw ApiException('Failed to fetch vital trends: ${response.statusCode}');
     }
     return jsonDecode(response.body) as Map<String, dynamic>;
   }

@@ -236,6 +236,56 @@ class _ConversationScreenState extends State<ConversationScreen> {
     });
   }
 
+  Future<void> _startNewConsultation() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.refresh, color: Colors.blueAccent),
+            SizedBox(width: 8),
+            Text('New Consultation'),
+          ],
+        ),
+        content: const Text(
+          'Start a new consultation session?\n\n'
+          'This clears the live chat view and starts a fresh conversation so the AI focuses completely on your new symptoms without previous context.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Start Fresh'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    try {
+      await _stopSpeaking();
+      final newId = await _apiClient.createConversation();
+      if (mounted) {
+        setState(() {
+          _conversationId = newId;
+          _messages.clear();
+          _error = null;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Started a fresh consultation session.')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _error = 'Failed to start new conversation: $e');
+      }
+    }
+  }
+
   @override
   void dispose() {
     if (_speechAvailable) {
@@ -253,6 +303,11 @@ class _ConversationScreenState extends State<ConversationScreen> {
       appBar: AppBar(
         title: const Text('Talk to Health AI'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.note_add_outlined),
+            tooltip: 'New Consultation / Clear Chat',
+            onPressed: _startNewConsultation,
+          ),
           IconButton(
             icon: const Icon(Icons.monitor_heart_outlined),
             tooltip: 'Enter/View Vitals',

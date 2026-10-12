@@ -58,3 +58,102 @@ async def ingest_measurement(db: AsyncSession, patient: Patient, measurement: No
     await db.commit()
     await db.refresh(record)
     return record
+
+
+async def bulk_ingest_measurements(
+    db: AsyncSession,
+    patient: Patient,
+    measurements: list[NormalizedMeasurement],
+) -> list[Measurement]:
+    """High-performance batch ingestion of vital measurements with deduplication.
+
+    1. Validates each measurement.
+    2. Identifies already-recorded readings in the DB for (patient_id, type, timestamp) to prevent duplicate rows.
+    3. Bulk-inserts new readings in a single flush.
+    4. Upserts the latest valid reading per vital type into the `vitals` snapshot table.
+    5. Commits once at the end of the batch, completing in milliseconds even for hundreds of samples.
+    """
+    if not measurements:
+        return []
+
+    # 1. Validate all measurements
+    validated = [(m, validate_measurement(m)) for m in measurements]
+
+    # 2. Query existing timestamps for this patient across the incoming types
+    types_set = list({m.type for m, _ in validated})
+    timestamps = [m.timestamp for m, _ in validated]
+
+    from sqlalchemy import select
+    stmt = select(Measurement.type, Measurement.timestamp).where(
+        Measurement.patient_id == patient.id,
+        Measurement.type.in_(types_set),
+        Measurement.timestamp.in_(timestamps),
+    )
+    existing_rows = (await db.execute(stmt)).all()
+    existing_keys = {(row[0], row[1]) for row in existing_rows}
+
+    records_to_insert: list[Measurement] = []
+    returned_records: list[Measurement] = []
+    seen_in_batch: set[tuple[str, Any]] = set()
+    latest_accepted_by_type: dict[str, tuple[NormalizedMeasurement, Measurement]] = {}
+
+    for m, outcome in validated:
+        key = (m.type, m.timestamp)
+        is_duplicate = key in existing_keys or key in seen_in_batch
+
+        record = Measurement(
+            patient_id=patient.id,
+            type=m.type,
+            value=m.value,
+            unit=m.unit,
+            timestamp=m.timestamp,
+            source=m.source,
+            device_id=m.device_id,
+            quality=m.quality,
+            confidence=m.confidence,
+            accepted=outcome.status == "accepted",
+            rejection_reason="DUPLICATE_ALREADY_RECORDED" if is_duplicate else outcome.reason,
+        )
+        returned_records.append(record)
+
+        if not is_duplicate:
+            seen_in_batch.add(key)
+            records_to_insert.append(record)
+            if outcome.status == "accepted":
+                if (
+                    m.type not in latest_accepted_by_type
+                    or m.timestamp >= latest_accepted_by_type[m.type][0].timestamp
+                ):
+                    latest_accepted_by_type[m.type] = (m, record)
+
+    # 3. Bulk insert new records
+    if records_to_insert:
+        db.add_all(records_to_insert)
+        await db.flush()
+
+    # 4. Upsert snapshot for latest reading per vital type
+    for vital_type, (m, record) in latest_accepted_by_type.items():
+        existing = await db.get(Vital, (patient.id, vital_type))
+        if existing is None:
+            db.add(
+                Vital(
+                    patient_id=patient.id,
+                    type=m.type,
+                    value=m.value,
+                    unit=m.unit,
+                    timestamp=m.timestamp,
+                    quality=m.quality,
+                    source=m.source,
+                    measurement_id=record.id,
+                )
+            )
+        elif m.timestamp >= existing.timestamp:
+            existing.value = m.value
+            existing.unit = m.unit
+            existing.timestamp = m.timestamp
+            existing.quality = m.quality
+            existing.source = m.source
+            existing.measurement_id = record.id
+
+    await db.commit()
+    return returned_records

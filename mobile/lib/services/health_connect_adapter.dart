@@ -104,17 +104,16 @@ class HealthConnectAdapter {
     return _health.requestAuthorization(_typeMap.keys.toList());
   }
 
-  /// Reads real Health Connect samples from [lookback] ago to now and returns them normalized
-  /// into the backend's vocabulary/units. Never fabricates a reading Health Connect didn't
-  /// actually provide, and never silently converts a type it doesn't recognise — an unmapped
-  /// HealthDataType or non-numeric value is simply skipped, not guessed at.
-  Future<List<HealthConnectReading>> readRecent({Duration lookback = const Duration(days: 7)}) async {
+  /// Reads real Health Connect samples in the specified [startTime] to [endTime] window.
+  Future<List<HealthConnectReading>> readRange({
+    required DateTime startTime,
+    required DateTime endTime,
+  }) async {
     await _ensureAvailable();
-    final now = DateTime.now();
     final points = await _health.getHealthDataFromTypes(
       types: _typeMap.keys.toList(),
-      startTime: now.subtract(lookback),
-      endTime: now,
+      startTime: startTime,
+      endTime: endTime,
     );
 
     final readings = <HealthConnectReading>[];
@@ -134,5 +133,11 @@ class HealthConnectAdapter {
       );
     }
     return readings;
+  }
+
+  /// Reads real Health Connect samples from [lookback] ago to now.
+  Future<List<HealthConnectReading>> readRecent({Duration lookback = const Duration(days: 1)}) async {
+    final now = DateTime.now();
+    return readRange(startTime: now.subtract(lookback), endTime: now);
   }
 }

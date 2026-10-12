@@ -23,6 +23,9 @@ class _HomeScreenState extends State<HomeScreen> {
   final _healthSyncService = HealthSyncService();
   bool _syncing = false;
   bool? _serverOnline;
+  Map<String, dynamic>? _vitalTrends;
+  DateTime? _lastSyncTime;
+  bool _loadingTrends = false;
 
   bool get _healthConnectSupported => !kIsWeb && Platform.isAndroid;
 
@@ -35,12 +38,30 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _initConnection() async {
     await ApiClient.getServerUrl();
     await _checkConnection();
+    await _loadVitalsOverview();
   }
 
   Future<void> _checkConnection() async {
     final online = await ApiClient.testConnection();
     if (mounted) {
       setState(() => _serverOnline = online);
+    }
+  }
+
+  Future<void> _loadVitalsOverview() async {
+    setState(() => _loadingTrends = true);
+    try {
+      final lastSync = await _healthSyncService.getLastSyncTime();
+      final trends = await _healthSyncService.getLocalTrends();
+      if (mounted) {
+        setState(() {
+          _lastSyncTime = lastSync;
+          _vitalTrends = trends;
+          _loadingTrends = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _loadingTrends = false);
     }
   }
 
@@ -232,9 +253,13 @@ class _HomeScreenState extends State<HomeScreen> {
       final result = await _healthSyncService.sync();
       messenger.showSnackBar(
         SnackBar(
-          content: Text('Synced ${result.synced} reading(s): ${result.accepted} accepted, ${result.rejected} rejected.'),
+          content: Text(
+            result.message ??
+                'Synced ${result.synced} reading(s): ${result.accepted} accepted, ${result.rejected} rejected.',
+          ),
         ),
       );
+      await _loadVitalsOverview();
     } on HealthConnectUnavailable catch (e) {
       messenger.showSnackBar(
         SnackBar(
@@ -350,7 +375,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
 
-              if (_healthConnectSupported) ...[
+                if (_healthConnectSupported) ...[
                 const SizedBox(height: 12),
                 SizedBox(
                   width: double.infinity,
@@ -364,9 +389,254 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
               ],
+
+              // 24-Hour Vitals Summary and Extreme Alerts
+              _buildTrendsAndAlertsCard(),
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  String _formatTime(DateTime dt) {
+    final local = dt.toLocal();
+    final hour = local.hour.toString().padLeft(2, '0');
+    final min = local.minute.toString().padLeft(2, '0');
+    return '${local.month}/${local.day} $hour:$min';
+  }
+
+  Widget _buildTrendsAndAlertsCard() {
+    if (_vitalTrends == null && !_loadingTrends) {
+      return const SizedBox.shrink();
+    }
+
+    if (_loadingTrends && _vitalTrends == null) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 20.0),
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    final rawTrends = _vitalTrends?['trends'] as Map<String, dynamic>? ?? {};
+    final alerts = (_vitalTrends?['extreme_alerts'] as List<dynamic>? ?? []).map((e) => e.toString()).toList();
+    final recommendations = (_vitalTrends?['recommendations'] as List<dynamic>? ?? []).map((e) => e.toString()).toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: 20),
+        // Extreme Alerts Banner
+        if (alerts.isNotEmpty) ...[
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: Colors.red.shade50,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.red.shade300),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.warning_amber_rounded, color: Colors.red.shade700, size: 22),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Vital Alert Detected',
+                      style: TextStyle(
+                        color: Colors.red.shade800,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 15,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                for (final alert in alerts)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Text(
+                      '• $alert',
+                      style: TextStyle(color: Colors.red.shade900, fontSize: 13),
+                    ),
+                  ),
+                if (recommendations.isNotEmpty) ...[
+                  const Divider(height: 16),
+                  Row(
+                    children: [
+                      Icon(Icons.lightbulb_outline, color: Colors.orange.shade800, size: 18),
+                      const SizedBox(width: 6),
+                      Text(
+                        'Clinical Recommendation',
+                        style: TextStyle(
+                          color: Colors.orange.shade900,
+                          fontWeight: FontWeight.w600,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  for (final rec in recommendations)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 2),
+                      child: Text(
+                        '• $rec',
+                        style: TextStyle(color: Colors.brown.shade800, fontSize: 12),
+                      ),
+                    ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+        ],
+
+        // Vitals Overview Card
+        Card(
+          elevation: 1,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(Icons.insights, size: 20, color: Colors.blueAccent),
+                        SizedBox(width: 8),
+                        Text(
+                          '24-Hour Vitals & Trends',
+                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                        ),
+                      ],
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.refresh, size: 18),
+                      tooltip: 'Refresh trends',
+                      onPressed: _loadingTrends ? null : _loadVitalsOverview,
+                    ),
+                  ],
+                ),
+                if (_lastSyncTime != null)
+                  Text(
+                    'Last synced: ${_formatTime(_lastSyncTime!)}',
+                    style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                  ),
+                const SizedBox(height: 12),
+                if (rawTrends.isEmpty)
+                  Text(
+                    'No vital measurements recorded yet. Sync with Health Connect or enter vitals manually above.',
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade700, fontStyle: FontStyle.italic),
+                  )
+                else
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      if (rawTrends.containsKey('heart_rate'))
+                        _buildMetricChip(
+                          icon: Icons.favorite,
+                          label: 'Heart Rate',
+                          value: '${(rawTrends['heart_rate']['current'] as num).toInt()} bpm',
+                          subtitle: 'avg ${(rawTrends['heart_rate']['avg'] as num).toInt()} (${(rawTrends['heart_rate']['min'] as num).toInt()}–${(rawTrends['heart_rate']['max'] as num).toInt()})',
+                          trend: rawTrends['heart_rate']['trend_direction'] as String?,
+                          color: Colors.redAccent,
+                        ),
+                      if (rawTrends.containsKey('oxygen_saturation'))
+                        _buildMetricChip(
+                          icon: Icons.air,
+                          label: 'SpO2',
+                          value: '${(rawTrends['oxygen_saturation']['current'] as num).toInt()}%',
+                          subtitle: 'min ${(rawTrends['oxygen_saturation']['min'] as num).toInt()}%',
+                          trend: rawTrends['oxygen_saturation']['trend_direction'] as String?,
+                          color: Colors.blueAccent,
+                        ),
+                      if (rawTrends.containsKey('body_temperature') || rawTrends.containsKey('temperature'))
+                        _buildMetricChip(
+                          icon: Icons.thermostat,
+                          label: 'Temp',
+                          value: '${rawTrends['body_temperature']?['current'] ?? rawTrends['temperature']?['current']}°F',
+                          subtitle: 'avg ${rawTrends['body_temperature']?['avg'] ?? rawTrends['temperature']?['avg']}°F',
+                          trend: (rawTrends['body_temperature']?['trend_direction'] ?? rawTrends['temperature']?['trend_direction']) as String?,
+                          color: Colors.deepOrangeAccent,
+                        ),
+                      if (rawTrends.containsKey('blood_pressure_systolic'))
+                        _buildMetricChip(
+                          icon: Icons.speed,
+                          label: 'BP',
+                          value: '${(rawTrends['blood_pressure_systolic']['current'] as num).toInt()} mmHg',
+                          subtitle: 'peak ${(rawTrends['blood_pressure_systolic']['max'] as num).toInt()}',
+                          color: Colors.purpleAccent,
+                        ),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMetricChip({
+    required IconData icon,
+    required String label,
+    required String value,
+    required String subtitle,
+    String? trend,
+    required Color color,
+  }) {
+    IconData? trendIcon;
+    Color? trendColor;
+    if (trend == 'rising') {
+      trendIcon = Icons.arrow_upward;
+      trendColor = Colors.orange;
+    } else if (trend == 'falling') {
+      trendIcon = Icons.arrow_downward;
+      trendColor = Colors.blue;
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: color.withAlpha(20),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withAlpha(60)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 16, color: color),
+              const SizedBox(width: 4),
+              Text(
+                label,
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: color),
+              ),
+              if (trendIcon != null) ...[
+                const SizedBox(width: 4),
+                Icon(trendIcon, size: 14, color: trendColor),
+              ],
+            ],
+          ),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+          ),
+          Text(
+            subtitle,
+            style: TextStyle(fontSize: 10, color: Colors.grey.shade700),
+          ),
+        ],
       ),
     );
   }

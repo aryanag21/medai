@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
@@ -16,7 +17,8 @@ from app.schemas.vital import (
     VitalSyncResult,
 )
 from app.vitals.schema import NormalizedMeasurement
-from app.vitals.service import ingest_measurement
+from app.vitals.service import bulk_ingest_measurements, ingest_measurement
+from app.vitals.trends import calculate_vital_trends
 
 router = APIRouter(prefix="/vitals", tags=["vitals"])
 
@@ -84,9 +86,8 @@ async def sync_vitals_from_health_platform(
     if device is None or device.patient_id != patient.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="device not found")
 
-    results: list[VitalSyncResult] = []
-    for reading in payload.readings:
-        measurement = NormalizedMeasurement(
+    measurements = [
+        NormalizedMeasurement(
             type=reading.type,
             value=reading.value,
             unit=reading.unit,
@@ -95,17 +96,21 @@ async def sync_vitals_from_health_platform(
             device_id=device.id,
             quality="good",
         )
-        record = await ingest_measurement(db, patient, measurement)
-        results.append(
-            VitalSyncResult(
-                type=record.type,
-                value=record.value,
-                unit=record.unit,
-                timestamp=record.timestamp,
-                accepted=record.accepted,
-                rejection_reason=record.rejection_reason,
-            )
+        for reading in payload.readings
+    ]
+
+    records = await bulk_ingest_measurements(db, patient, measurements)
+    results = [
+        VitalSyncResult(
+            type=record.type,
+            value=record.value,
+            unit=record.unit,
+            timestamp=record.timestamp,
+            accepted=record.accepted,
+            rejection_reason=record.rejection_reason,
         )
+        for record in records
+    ]
 
     accepted_count = sum(1 for r in results if r.accepted)
     return VitalSyncResponse(
@@ -114,6 +119,36 @@ async def sync_vitals_from_health_platform(
         rejected=len(results) - accepted_count,
         results=results,
     )
+
+
+@router.get("/sync/latest")
+async def get_latest_sync_timestamp(
+    patient: Patient = Depends(get_current_patient),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, str | None]:
+    """Returns the latest measurement timestamp recorded for this patient so the mobile
+    client only syncs new readings rather than re-requesting old historical ranges.
+    """
+    from sqlalchemy import func
+
+    result = await db.execute(
+        select(func.max(Measurement.timestamp)).where(Measurement.patient_id == patient.id)
+    )
+    latest = result.scalar_one_or_none()
+    return {"latest_timestamp": latest.isoformat() if latest else None}
+
+
+@router.get("/trends")
+async def get_patient_vital_trends(
+    window_hours: int = Query(default=24, ge=1, le=168),
+    patient: Patient = Depends(get_current_patient),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Calculates statistical health trends, min/max/average ranges, and detects extreme
+    vital anomalies across the patient's vitals for the specified time window.
+    """
+    from typing import Any
+    return await calculate_vital_trends(db, patient.id, window_hours=window_hours)
 
 
 @router.get("/history", response_model=list[MeasurementResponse])
