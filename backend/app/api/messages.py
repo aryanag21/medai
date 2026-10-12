@@ -179,6 +179,7 @@ async def send_message(
         latest_message=payload.content,
         conversation_history=history,
         db=db,
+        conversation_id=conversation.id,
     )
 
     assistant_message = Message(conversation_id=conversation.id, role="assistant", content=reply_text)

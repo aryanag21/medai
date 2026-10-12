@@ -1,8 +1,9 @@
 import uuid
 from datetime import datetime
+from typing import Any
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -162,6 +163,7 @@ class Symptom(Base):
     relieving_factors: Mapped[str | None] = mapped_column(EncryptedString, nullable=True)
     associated_symptoms: Mapped[str | None] = mapped_column(EncryptedString, nullable=True)
     certainty: Mapped[str] = mapped_column(String, default="user_reported", nullable=False)
+    status: Mapped[str] = mapped_column(String, default="active", nullable=False)  # active | resolved
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -326,3 +328,29 @@ class AuditLog(Base):
     module: Mapped[str] = mapped_column(String, nullable=False)
     latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class DiagnosticRecord(Base):
+    """Records a patient diagnostic consultation summary along with the exact snapshot of
+    vital signs captured at the time of diagnosis. Accessible directly by the patient
+    in the mobile application."""
+
+    __tablename__ = "diagnostic_records"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    patient_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("patients.id"), nullable=False)
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=True
+    )
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    chief_complaint: Mapped[str] = mapped_column(Text, nullable=False)
+    assessment: Mapped[str] = mapped_column(Text, nullable=False)
+    plan: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String, default="active", nullable=False)  # active | resolved
+    symptoms: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    vitals_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+

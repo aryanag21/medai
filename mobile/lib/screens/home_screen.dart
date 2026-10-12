@@ -7,6 +7,7 @@ import '../services/api_client.dart';
 import '../services/health_connect_adapter.dart';
 import '../services/health_sync_service.dart';
 import 'conversation_screen.dart';
+import 'diagnostic_history_screen.dart';
 import 'manual_vitals_screen.dart';
 
 /// Entry screen. Screens for onboarding/consent/profile/history/allergies/medications
@@ -372,6 +373,20 @@ class _HomeScreenState extends State<HomeScreen> {
                   label: const Text('Enter Vitals Manually'),
                   style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
                   onPressed: _openManualVitals,
+                ),
+              ),
+              const SizedBox(height: 12),
+
+              // Diagnostic History & Vitals Log
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.tonalIcon(
+                  icon: const Icon(Icons.history_edu),
+                  label: const Text('Diagnostic History & Vitals Log'),
+                  style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const DiagnosticHistoryScreen()),
+                  ),
                 ),
               ),
 

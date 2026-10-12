@@ -135,6 +135,15 @@ class ApiClient {
     return response;
   }
 
+  Future<http.Response> _authedPatch(Uri uri, {Object? body}) async {
+    var response = await http.patch(uri, headers: await _authHeaders(), body: body);
+    if (response.statusCode == 401) {
+      await _storage.delete(key: _accessTokenKey);
+      response = await http.patch(uri, headers: await _authHeaders(), body: body);
+    }
+    return response;
+  }
+
   Future<String> createConversation() async {
     final response = await _authedPost(Uri.parse('$baseUrl/conversations'));
     if (response.statusCode != 201) {
@@ -332,6 +341,33 @@ class ApiClient {
       throw ApiException('Failed to fetch vitals: ${response.statusCode}');
     }
     return (jsonDecode(response.body) as List).cast<Map<String, dynamic>>();
+  }
+
+  /// Retrieves the patient's diagnostic history and recorded vitals snapshots.
+  Future<List<Map<String, dynamic>>> getDiagnosticHistory({String? status}) async {
+    final uri = Uri.parse('$baseUrl/diagnostics').replace(
+      queryParameters: status != null ? {'status': status} : null,
+    );
+    final response = await _authedGet(uri);
+    if (response.statusCode != 200) {
+      throw ApiException('Failed to fetch diagnostic history: ${response.statusCode}');
+    }
+    return (jsonDecode(response.body) as List).cast<Map<String, dynamic>>();
+  }
+
+  /// Updates the status of a diagnostic record (e.g. 'resolved' or 'active').
+  Future<Map<String, dynamic>> updateDiagnosticStatus({
+    required String recordId,
+    required String status,
+  }) async {
+    final response = await _authedPatch(
+      Uri.parse('$baseUrl/diagnostics/$recordId/status'),
+      body: jsonEncode({'status': status}),
+    );
+    if (response.statusCode != 200) {
+      throw ApiException('Failed to update diagnostic status: ${response.statusCode}');
+    }
+    return jsonDecode(response.body) as Map<String, dynamic>;
   }
 }
 

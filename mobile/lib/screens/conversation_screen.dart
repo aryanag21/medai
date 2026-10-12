@@ -3,6 +3,7 @@ import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import '../services/api_client.dart';
 import '../services/speech_playback_service.dart';
+import 'diagnostic_history_screen.dart';
 import 'manual_vitals_screen.dart';
 
 class ChatEntry {
@@ -303,6 +304,15 @@ class _ConversationScreenState extends State<ConversationScreen> {
       appBar: AppBar(
         title: const Text('Talk to Health AI'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.history_edu),
+            tooltip: 'Diagnostic History & Vitals Log',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => DiagnosticHistoryScreen(apiClient: _apiClient),
+              ),
+            ),
+          ),
           IconButton(
             icon: const Icon(Icons.note_add_outlined),
             tooltip: 'New Consultation / Clear Chat',

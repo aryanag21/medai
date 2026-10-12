@@ -276,6 +276,7 @@ async def generate_conversational_reply(
     latest_message: str,
     conversation_history: list[dict[str, str]],
     db: Any | None = None,
+    conversation_id: Any | None = None,
 ) -> tuple[str, bool, str | None, str | None]:
     """Generates a concise, natural, human-sounding conversational clinical response."""
 
@@ -286,7 +287,54 @@ async def generate_conversational_reply(
         reply = generate_emergency_response(latest_message)
         return reply, True, "emergency", emergency_reason
 
-    # 2. Vital trends & Anomaly alerts
+    # 2. Check for patient reporting resolution of prior symptoms ("cough is gone", "foot is fine")
+    text_lower = latest_message.lower()
+    resolved_detected = []
+    if any(w in text_lower for w in ["cough is gone", "cough has gone", "cough stopped", "no more cough", "cough healed", "cough is better", "cleared up"]):
+        resolved_detected.append("cough")
+    if any(w in text_lower for w in ["foot is fine", "foot healed", "bruise gone", "bruise healed", "no more foot pain", "door hit healed"]):
+        resolved_detected.append("foot")
+        resolved_detected.append("bruise")
+    if any(w in text_lower for w in ["back is fine", "back healed", "no more back pain", "back pain gone"]):
+        resolved_detected.append("back")
+    if any(w in text_lower for w in ["throat is fine", "throat healed", "no more throat pain", "throat pain gone"]):
+        resolved_detected.append("throat")
+    if any(w in text_lower for w in ["fever is gone", "no fever now", "temperature is normal", "fever broke"]):
+        resolved_detected.append("fever")
+
+    if resolved_detected and db is not None and getattr(state.patient, "id", None):
+        try:
+            from app.diagnostics.service import update_symptom_status_by_name
+            for sym in resolved_detected:
+                await update_symptom_status_by_name(db, state.patient.id, sym, "resolved")
+        except Exception as e:
+            logger.warning("Could not update resolved symptoms: %s", e)
+
+    # 3. Categorize active vs resolved symptoms for clinical reasoning
+    active_symptoms: list[str] = []
+    resolved_symptoms: list[str] = []
+    if db is not None and getattr(state.patient, "id", None):
+        try:
+            from sqlalchemy import select
+            from app.db.models import Symptom
+            s_res = await db.execute(select(Symptom).where(Symptom.patient_id == state.patient.id))
+            for s in s_res.scalars().all():
+                if getattr(s, "status", "active") == "resolved" or s.symptom.lower() in resolved_detected:
+                    resolved_symptoms.append(s.symptom)
+                else:
+                    active_symptoms.append(s.symptom)
+        except Exception:
+            active_symptoms = [s.symptom for s in getattr(state, "symptoms", [])]
+    else:
+        active_symptoms = [s.symptom for s in getattr(state, "symptoms", [])]
+
+    active_symptoms = list(dict.fromkeys(active_symptoms))
+    resolved_symptoms = list(dict.fromkeys(resolved_symptoms))
+
+    active_sym_str = ", ".join(active_symptoms) if active_symptoms else "None recorded"
+    resolved_sym_str = ", ".join(resolved_symptoms) if resolved_symptoms else "None"
+
+    # 4. Vital trends & Anomaly alerts
     trends_line = ""
     if db is not None and getattr(state.patient, "id", None):
         try:
@@ -298,7 +346,7 @@ async def generate_conversational_reply(
         except Exception as e:
             logger.warning("Could not calculate vital trends for prompt: %s", e)
 
-    # 3. Known patient context for prompt
+    # 5. Known patient context for prompt
     vitals_text = format_vitals_summary(state.vitals)
     vitals_line = f"• Current Recorded Vitals: {vitals_text}\n" if vitals_text else ""
     allergies_str = ", ".join(a.substance for a in state.allergies)
@@ -309,21 +357,31 @@ async def generate_conversational_reply(
     system_prompt = (
         "You are MEDAI, a warm, highly empathetic, and exceptionally clear clinical AI physician.\n"
         "You speak naturally and conversationally, like a trusted doctor having a direct consultation with a patient.\n\n"
-        f"{vitals_line}{trends_line}{allergies_line}{meds_line}\n"
+        f"{vitals_line}{trends_line}{allergies_line}{meds_line}"
+        f"• Patient Active Reported Symptoms: {active_sym_str}\n"
+        f"• Resolved Past Issues: {resolved_sym_str}\n\n"
         "CRITICAL CLINICAL & CONVERSATIONAL RULES:\n"
-        "1. DYNAMIC FOCUS ON LATEST COMPLAINT: Always prioritize what the patient is asking RIGHT NOW in their latest message. "
-        "If the patient changes the topic (e.g. from a cough or injury to trouble sleeping, fever, stomach upset, or back pain), IMMEDIATELY pivot to the new problem. "
-        "NEVER bring up or fixate on older historical symptoms (like an old foot injury, cough, or bruise from earlier) unless the patient explicitly connects them!\n"
-        "2. EXTREME BREVITY & SCANNABILITY: Keep responses strictly between 90 and 130 words (2 to 3 short, breezy paragraphs max). "
-        "Use generous whitespace and bold highlights for medicine names and doses. Never write dense, overwhelming walls of text.\n"
-        "3. NATURAL & EMPATHETIC HUMAN TONE: Open with a warm, caring sentence acknowledging their immediate situation. Speak calmly and practically.\n"
-        "4. PRACTICAL RELIEF: Provide 1-2 practical, safe over-the-counter remedies with clear adult doses and actionable lifestyle/home steps.\n"
-        "5. VITAL TRENDS & EXTREME ALERTS: If wearable trends or extreme alerts are noted above (like a drop in SpO2 or elevated resting heart rate), address them with appropriate clinical caution.\n"
-        "6. NEVER ASK FOR VITALS IN CHAT: Vitals are automatically synced by the app.\n"
+        "1. CHIEF COMPLAINT FOCUS: Give primary attention to what the patient is describing in their latest message.\n"
+        "2. CLINICAL CORRELATION & SYNDROMIC REASONING:\n"
+        "   - Clinically Related Symptoms: If the patient brings up a new symptom that could share an underlying cause or disease with an active prior symptom "
+        "(for example: cough + new fever or shortness of breath -> possible respiratory infection/bronchitis/pneumonia; abdominal pain + vomiting/diarrhea -> viral gastroenteritis; "
+        "headache + neck stiffness/light sensitivity), CONNECT THEM! Synthesize them together into a unified clinical picture.\n"
+        "   - Clinically Unrelated Symptoms: If the new complaint is clearly independent or traumatic (for example, slamming their foot into a door or stubbing a toe while also having a cough), "
+        "address the acute trauma immediately (R.I.C.E., ice, elevation, pain relief) without confusing or conflating the cough into the injury care.\n"
+        "3. NATURAL SYMPTOM STATUS CHECK & CONTINUITY:\n"
+        "   - When the patient has active prior symptoms on record (such as an earlier cough), naturally and casually ask whether it has cleared up or is still lingering "
+        "(e.g. 'How is that cough doing, by the way—has it subsided or is it still persistent?').\n"
+        "   - If they state it is resolved, acknowledge their recovery warmly. If they confirm it is persisting and relevant, incorporate that chronicity into your ongoing diagnosis.\n"
+        "4. CONCISE, SCANNABLE & HUMAN (100–145 words): Write 2 to 3 short paragraphs max with generous whitespace. Use bold text for medicine names and clear adult doses. "
+        "Speak with genuine warmth and empathy. Avoid dense essays or robotic bullet lists.\n"
+        "5. PRACTICAL RELIEF: Provide 1-2 practical, safe over-the-counter remedies with clear adult doses and actionable lifestyle/home steps.\n"
+        "6. VITAL SIGNS & WEARABLE TRENDS: If wearable trends or extreme alerts are noted above, comment gently if relevant. Never ask for vitals in chat.\n"
         "7. CLOSE WITH ONE SHORT QUESTION: End with exactly one gentle, relevant follow-up question."
     )
 
-    # 3. Try LLM generation
+    final_reply: str | None = None
+
+    # 6. Try LLM generation
     try:
         history_lines = []
         for msg in conversation_history[-4:]:
@@ -335,10 +393,27 @@ async def generate_conversational_reply(
         reply = await llm.generate(prompt, system=system_prompt)
         reply = reply.strip()
         if reply:
-            return reply, False, None, None
+            final_reply = reply
     except Exception as exc:
         logger.warning("LLM conversational generation failed (%s); using intelligent clinical fallback", exc)
 
-    # 4. Fallback to concise, empathetic clinical responder
-    fallback_reply = generate_fallback_clinical_response(state, latest_message, conversation_history)
-    return fallback_reply, False, None, None
+    # 7. Fallback to concise, empathetic clinical responder if LLM didn't produce reply
+    if not final_reply:
+        final_reply = generate_fallback_clinical_response(state, latest_message, conversation_history)
+
+    # 8. Auto-record consultation diagnostic record with vitals snapshot
+    if db is not None and getattr(state.patient, "id", None) and final_reply:
+        try:
+            from app.diagnostics.service import auto_record_consultation_diagnosis
+            await auto_record_consultation_diagnosis(
+                db=db,
+                patient_id=state.patient.id,
+                conversation_id=conversation_id,
+                user_text=latest_message,
+                reply_text=final_reply,
+                state=state,
+            )
+        except Exception as e:
+            logger.warning("Could not auto-record consultation diagnosis: %s", e)
+
+    return final_reply, False, None, None
