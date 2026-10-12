@@ -15,7 +15,7 @@ import 'package:uuid/uuid.dart';
 class ApiClient {
   ApiClient({String? baseUrl}) : baseUrl = baseUrl ?? _activeBaseUrl;
 
-  static const String _defaultBaseUrl = 'https://cia-kathy-travelers-distributor.trycloudflare.com';
+  static const String _defaultBaseUrl = 'https://democrat-vacancies-space-concerts.trycloudflare.com';
   static String _activeBaseUrl = _defaultBaseUrl;
   static const _serverUrlKey = 'medai_server_url';
 
