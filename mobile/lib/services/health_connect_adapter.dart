@@ -194,7 +194,7 @@ class HealthConnectAdapter {
       double? numVal;
       if (value is NumericHealthValue) {
         numVal = value.numericValue.toDouble();
-      } else if (value != null) {
+      } else {
         numVal = double.tryParse(value.toString().replaceAll(RegExp(r'[^0-9.]'), ''));
       }
       if (numVal == null || numVal <= 0) continue;
