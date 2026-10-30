@@ -11,12 +11,7 @@ class HealthConnectUnavailable implements Exception {
 }
 
 // Health Connect reports body temperature in Celsius (HealthDataUnit.DEGREE_CELSIUS); the
-// backend's canonical unit is Fahrenheit (app/safety/vital_rules.py's sourced thresholds and
-// app/vitals/validation.py's EXPECTED_UNITS are both in F). Every other supported type Health
-// Connect reports in the unit the backend already expects (bpm, %, mmHg, breaths/min, kg) — no
-// conversion needed, verified against the installed package's own default-unit table
-// (lib/src/heath_data_types.dart). A top-level function, not a private method, so it's directly
-// unit-testable without touching the Health Connect SDK itself.
+// backend's canonical unit is Fahrenheit.
 double convertHealthConnectValue(String vitalType, double rawValue) {
   if (vitalType == 'body_temperature') {
     return rawValue * 9 / 5 + 32;
@@ -24,17 +19,14 @@ double convertHealthConnectValue(String vitalType, double rawValue) {
   return rawValue;
 }
 
-/// The wire shape POST /vitals/sync expects — see backend/app/schemas/vital.py's
-/// VitalSyncReading. `type`/`unit` are already in the backend's canonical vocabulary
-/// (app/vitals/schema.py's VitalType, app/vitals/validation.py's EXPECTED_UNITS), converted
-/// here rather than left for the server to guess.
+/// The wire shape POST /vitals/sync expects. All timestamps are strictly converted to UTC.
 class HealthConnectReading {
   HealthConnectReading({
     required this.type,
     required this.value,
     required this.unit,
-    required this.timestamp,
-  });
+    required DateTime timestamp,
+  }) : timestamp = timestamp.toUtc();
 
   final String type;
   final double value;
@@ -45,41 +37,41 @@ class HealthConnectReading {
         'type': type,
         'value': value,
         'unit': unit,
-        'timestamp': timestamp.toUtc().toIso8601String(),
+        'timestamp': timestamp.toIso8601String(),
       };
 
   factory HealthConnectReading.fromJson(Map<String, dynamic> json) => HealthConnectReading(
         type: json['type'] as String,
         value: (json['value'] as num).toDouble(),
         unit: json['unit'] as String,
-        timestamp: DateTime.parse(json['timestamp'] as String),
+        timestamp: DateTime.parse(json['timestamp'] as String).toUtc(),
       );
 }
 
 /// Deduplicates and downsamples dense high-frequency readings from companion apps like Nothing X
-/// or wearable watches. Continuous metrics (heart rate, respiratory rate) are aggregated into
-/// 1-minute buckets (taking the mean value), while discrete readings (BP, SpO2, temp) are kept intact.
+/// into 1-minute buckets in UTC, while preserving discrete readings (BP, SpO2, temp).
 List<HealthConnectReading> bucketAndDeduplicateReadings(List<HealthConnectReading> raw) {
   if (raw.isEmpty) return [];
 
   // Filter out non-positive values and corrupt future timestamps
-  final nowLimit = DateTime.now().add(const Duration(minutes: 5));
-  final valid = raw.where((r) => r.value > 0 && r.timestamp.isBefore(nowLimit)).toList();
+  final nowLimit = DateTime.now().toUtc().add(const Duration(minutes: 15));
+  final valid = raw.where((r) => r.value > 0 && r.timestamp.toUtc().isBefore(nowLimit)).toList();
   valid.sort((a, b) => a.timestamp.compareTo(b.timestamp));
 
   final processed = <HealthConnectReading>[];
 
-  // Group continuous vitals into 1-minute buckets
+  // Group continuous vitals into 1-minute buckets (UTC-safe)
   final continuousBuckets = <String, Map<String, List<double>>>{};
   final continuousTimestamps = <String, Map<String, DateTime>>{};
   final continuousUnits = <String, String>{};
   final seenDiscrete = <String>{};
 
   for (final r in valid) {
+    final utc = r.timestamp.toUtc();
     if (r.type == 'heart_rate' || r.type == 'respiratory_rate') {
       continuousUnits[r.type] = r.unit;
       final bucketKey =
-          '${r.timestamp.year}-${r.timestamp.month.toString().padLeft(2, '0')}-${r.timestamp.day.toString().padLeft(2, '0')} ${r.timestamp.hour.toString().padLeft(2, '0')}:${r.timestamp.minute.toString().padLeft(2, '0')}';
+          '${utc.year}-${utc.month.toString().padLeft(2, '0')}-${utc.day.toString().padLeft(2, '0')} ${utc.hour.toString().padLeft(2, '0')}:${utc.minute.toString().padLeft(2, '0')}';
       final typeBuckets = continuousBuckets.putIfAbsent(r.type, () => {});
       final values = typeBuckets.putIfAbsent(bucketKey, () => []);
       values.add(r.value);
@@ -88,19 +80,24 @@ List<HealthConnectReading> bucketAndDeduplicateReadings(List<HealthConnectReadin
       typeTimes.putIfAbsent(
         bucketKey,
         () => DateTime.utc(
-          r.timestamp.year,
-          r.timestamp.month,
-          r.timestamp.day,
-          r.timestamp.hour,
-          r.timestamp.minute,
+          utc.year,
+          utc.month,
+          utc.day,
+          utc.hour,
+          utc.minute,
         ),
       );
     } else {
       // Discrete vitals: deduplicate identical type + timestamp
-      final key = '${r.type}_${r.timestamp.millisecondsSinceEpoch}';
+      final key = '${r.type}_${utc.millisecondsSinceEpoch}';
       if (!seenDiscrete.contains(key)) {
         seenDiscrete.add(key);
-        processed.add(r);
+        processed.add(HealthConnectReading(
+          type: r.type,
+          value: r.value,
+          unit: r.unit,
+          timestamp: utc,
+        ));
       }
     }
   }
@@ -132,7 +129,7 @@ List<HealthConnectReading> bucketAndDeduplicateReadings(List<HealthConnectReadin
   return processed;
 }
 
-/// The real, concrete DeviceAdapter for Google Health Connect (Phase 10).
+/// The concrete DeviceAdapter for Google Health Connect (Phase 10).
 class HealthConnectAdapter {
   final Health _health = Health();
 
@@ -193,14 +190,21 @@ class HealthConnectAdapter {
       final vitalType = _typeMap[point.type];
       if (vitalType == null) continue;
       final value = point.value;
-      if (value is! NumericHealthValue) continue;
+
+      double? numVal;
+      if (value is NumericHealthValue) {
+        numVal = value.numericValue.toDouble();
+      } else if (value != null) {
+        numVal = double.tryParse(value.toString().replaceAll(RegExp(r'[^0-9.]'), ''));
+      }
+      if (numVal == null || numVal <= 0) continue;
 
       rawReadings.add(
         HealthConnectReading(
           type: vitalType,
-          value: convertHealthConnectValue(vitalType, value.numericValue.toDouble()),
+          value: convertHealthConnectValue(vitalType, numVal),
           unit: _expectedUnit[vitalType]!,
-          timestamp: point.dateFrom,
+          timestamp: point.dateFrom.toUtc(),
         ),
       );
     }

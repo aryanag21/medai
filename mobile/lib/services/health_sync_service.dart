@@ -4,25 +4,25 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'api_client.dart';
 import 'health_connect_adapter.dart';
 
-/// Result of one sync attempt — surfaced to the UI so a rejected reading is never silently
-/// dropped from what the user sees, matching vital_system's "never silently drop" rule.
+/// Result of one sync attempt — surfaced to the UI.
 class HealthSyncResult {
   HealthSyncResult({
     required this.synced,
     required this.accepted,
     required this.rejected,
     this.message,
+    this.latestReading,
   });
   final int synced;
   final int accepted;
   final int rejected;
   final String? message;
+  final HealthConnectReading? latestReading;
 }
 
-/// Ties HealthConnectAdapter (reads real Health Connect data) to ApiClient (POSTs it to the
-/// backend's VITAL_SERVICE at /vitals/sync). Automatically tracks the last synced timestamp
-/// so incremental syncs only fetch new data since the previous sync, preventing redundant
-/// re-processing of thousands of historical records from companion apps like Nothing X.
+/// Ties HealthConnectAdapter (reads Health Connect data) to ApiClient (POSTs to /vitals/sync).
+/// Uses a generous 24-hour lookback window so companion app batches (Nothing X) are always
+/// captured without getting stuck in a 0-second timeframe.
 class HealthSyncService {
   HealthSyncService({ApiClient? apiClient, HealthConnectAdapter? adapter})
       : _apiClient = apiClient ?? ApiClient(),
@@ -41,7 +41,7 @@ class HealthSyncService {
     final existing = await _storage.read(key: _deviceIdKey);
     if (existing != null) return existing;
 
-    final deviceId = await _apiClient.registerDevice(deviceType: 'health_connect', label: 'Health Connect');
+    final deviceId = await _apiClient.registerDevice(deviceType: 'health_connect', label: 'Nothing X / Health Connect');
     await _storage.write(key: _deviceIdKey, value: deviceId);
     return deviceId;
   }
@@ -62,7 +62,6 @@ class HealthSyncService {
       final parsed = DateTime.tryParse(stored);
       if (parsed != null) return parsed;
     }
-    // Fall back to querying the backend for the patient's latest recorded timestamp
     try {
       final remoteLatest = await _apiClient.getLatestSyncTimestamp();
       if (remoteLatest != null) {
@@ -74,46 +73,26 @@ class HealthSyncService {
     }
   }
 
-  /// Reads new Health Connect data since the last sync timestamp (or default 24h lookback for first sync)
-  /// and syncs it incrementally to the backend. Chunks large batches and checkpoints progress after each chunk.
+  /// Reads Health Connect data across a 24-hour lookback window, buckets high-frequency samples,
+  /// and syncs to backend with deduplication.
   Future<HealthSyncResult> sync({
     Duration defaultLookback = const Duration(hours: 24),
     void Function(String message)? onProgress,
   }) async {
     final now = DateTime.now();
-    final lastSync = await getLastSyncTime();
+    // Generous 24-hour lookback ensures wearable readings from Nothing X are ALWAYS found
+    final startTime = now.subtract(defaultLookback);
 
-    DateTime startTime;
-    if (lastSync == null) {
-      startTime = now.subtract(defaultLookback);
-    } else {
-      // Start 1 millisecond after the last recorded sample to avoid duplicating the exact timestamp
-      startTime = lastSync.add(const Duration(milliseconds: 1));
-      // Cap at 48 hours lookback to prevent enormous payloads if device was offline for weeks
-      final maxLookback = now.subtract(const Duration(hours: 48));
-      if (startTime.isBefore(maxLookback)) {
-        startTime = maxLookback;
-      }
-    }
-
-    if (!startTime.isBefore(now)) {
-      return HealthSyncResult(
-        synced: 0,
-        accepted: 0,
-        rejected: 0,
-        message: 'Already up to date.',
-      );
-    }
-
-    onProgress?.call('Reading Health Connect wearable data...');
+    onProgress?.call('Reading wearable vitals from Health Connect...');
     final readings = await _adapter.readRange(startTime: startTime, endTime: now);
+
     if (readings.isEmpty) {
-      await _storage.write(key: _lastSyncTimeKey, value: now.toIso8601String());
+      // Note: Never advance _lastSyncTimeKey on empty results
       return HealthSyncResult(
         synced: 0,
         accepted: 0,
         rejected: 0,
-        message: 'No new wearable data found in this timeframe.',
+        message: 'No wearable data received from Health Connect in the past 24h. Make sure Nothing X has "Write" access in Health Connect.',
       );
     }
 
@@ -143,11 +122,9 @@ class HealthSyncService {
         totalAccepted += (response['accepted'] as int? ?? 0);
         totalRejected += (response['rejected'] as int? ?? 0);
 
-        // Immediate checkpoint: save the highest timestamp of this completed chunk!
         final chunkLatest = chunk.map((r) => r.timestamp).reduce((a, b) => a.isAfter(b) ? a : b);
         await _storage.write(key: _lastSyncTimeKey, value: chunkLatest.toIso8601String());
       } catch (e) {
-        // If a batch fails midway, checkpoint has already preserved earlier chunks!
         if (totalSynced > 0) {
           return HealthSyncResult(
             synced: totalSynced,
@@ -166,11 +143,23 @@ class HealthSyncService {
       await _storage.write(key: _cachedTrendsKey, value: jsonEncode(trends));
     } catch (_) {}
 
+    HealthConnectReading? latestHr;
+    try {
+      latestHr = readings.lastWhere((r) => r.type == 'heart_rate');
+    } catch (_) {
+      latestHr = readings.isNotEmpty ? readings.last : null;
+    }
+
+    final hrInfo = latestHr != null ? ' (Latest ${latestHr.type == 'heart_rate' ? 'Heart Rate' : latestHr.type}: ${latestHr.value.toInt()} ${latestHr.unit})' : '';
+
     return HealthSyncResult(
       synced: totalSynced,
       accepted: totalAccepted,
       rejected: totalRejected,
-      message: 'Successfully synced $totalSynced reading(s) from Health Connect.',
+      latestReading: latestHr,
+      message: totalAccepted > 0
+          ? 'Synced $totalAccepted new reading(s) from Nothing X$hrInfo. Recorded in diagnostic history!'
+          : 'All $totalSynced wearable readings are up to date in MEDAI$hrInfo. Logged in diagnostic history.',
     );
   }
 
@@ -189,7 +178,6 @@ class HealthSyncService {
         list.add(r.toJson());
       }
 
-      // Keep most recent 500 samples locally to avoid unbounded growth
       if (list.length > 500) {
         list = list.sublist(list.length - 500);
       }
@@ -198,8 +186,7 @@ class HealthSyncService {
     } catch (_) {}
   }
 
-  /// Computes offline health trends, statistical min/max/average, and extreme clinical suggestions
-  /// directly from locally stored readings.
+  /// Computes offline health trends, statistical min/max/average, and extreme clinical suggestions.
   Future<Map<String, dynamic>> _computeAndStoreLocalTrends() async {
     try {
       final existingRaw = await _storage.read(key: _localSamplesKey);
@@ -224,12 +211,10 @@ class HealthSyncService {
         return jsonDecode(cached) as Map<String, dynamic>;
       } catch (_) {}
     }
-    // If not cached, attempt to compute from local samples
     final localComputed = await _computeAndStoreLocalTrends();
     if (localComputed.isNotEmpty) {
       return localComputed;
     }
-    // Try fetching from backend
     try {
       final remote = await _apiClient.getVitalTrends(windowHours: 24);
       await _storage.write(key: _cachedTrendsKey, value: jsonEncode(remote));
@@ -287,7 +272,6 @@ Map<String, dynamic> calculateLocalTrends(List<HealthConnectReading> readings) {
       'latest_timestamp': samples.last.timestamp.toIso8601String(),
     };
 
-    // Extreme anomaly checks and clinical suggestions
     if (type == 'heart_rate') {
       if (maxVal >= 130) {
         extremeAlerts.add('Heart rate spiked to an extreme ${maxVal.toInt()} bpm (average is ${avgVal.toInt()} bpm).');

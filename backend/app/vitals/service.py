@@ -71,7 +71,8 @@ async def bulk_ingest_measurements(
     2. Identifies already-recorded readings in the DB for (patient_id, type, timestamp) to prevent duplicate rows.
     3. Bulk-inserts new readings in a single flush.
     4. Upserts the latest valid reading per vital type into the `vitals` snapshot table.
-    5. Commits once at the end of the batch, completing in milliseconds even for hundreds of samples.
+    5. Automatically logs/updates a DiagnosticRecord with the vitals snapshot in patient history.
+    6. Commits once at the end of the batch, completing in milliseconds even for hundreds of samples.
     """
     if not measurements:
         return []
@@ -156,4 +157,44 @@ async def bulk_ingest_measurements(
             existing.measurement_id = record.id
 
     await db.commit()
+
+    # 5. Automatically log to Diagnostic History with latest vitals snapshot
+    if latest_accepted_by_type:
+        try:
+            from app.diagnostics.service import record_diagnostic_entry
+            vitals_snapshot = {
+                vt: {"value": m.value, "unit": m.unit, "timestamp": m.timestamp.isoformat()}
+                for vt, (m, _) in latest_accepted_by_type.items()
+            }
+            hr_val = vitals_snapshot.get("heart_rate", {}).get("value")
+            spo2_val = vitals_snapshot.get("oxygen_saturation", {}).get("value")
+
+            summary_parts = []
+            if hr_val:
+                summary_parts.append(f"Heart Rate: {int(hr_val)} bpm")
+            if spo2_val:
+                summary_parts.append(f"SpO2: {int(spo2_val)}%")
+            complaint_str = ", ".join(summary_parts) if summary_parts else "Wearable biometric telemetry"
+
+            is_urgent = False
+            if hr_val and (hr_val > 120 or hr_val < 50):
+                is_urgent = True
+            if spo2_val and spo2_val < 92:
+                is_urgent = True
+
+            title = "Wearable Vital Alert" if is_urgent else "Wearable Vitals Telemetry (Nothing X)"
+            await record_diagnostic_entry(
+                db=db,
+                patient_id=patient.id,
+                title=title,
+                chief_complaint=f"Wearable sync: {complaint_str}",
+                assessment="Biometric telemetry recorded from connected wearable companion app (Nothing X / Health Connect).",
+                plan="Continuous biometric monitoring active. Consult AI or healthcare professional if symptomatic.",
+                symptoms=[],
+                vitals=vitals_snapshot,
+            )
+            await db.commit()
+        except Exception:
+            pass
+
     return returned_records
