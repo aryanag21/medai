@@ -13,7 +13,7 @@ class ApiClient {
       : baseUrl = baseUrl ?? _activeBaseUrl,
         _httpClient = client ?? http.Client();
 
-  static const String _defaultBaseUrl = 'https://democrat-vacancies-space-concerts.trycloudflare.com';
+  static const String _defaultBaseUrl = 'https://norm-looksmart-toronto-widescreen.trycloudflare.com';
   static String _activeBaseUrl = _defaultBaseUrl;
   static const _serverUrlKey = 'medai_server_url';
 
