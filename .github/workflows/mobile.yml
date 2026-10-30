@@ -11,6 +11,9 @@ on:
       - ".github/workflows/mobile.yml"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -44,9 +47,22 @@ jobs:
       - name: Build Android Release APK
         run: flutter build apk --release
 
-      - name: Upload Release APK
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: medai-android-release-apk
           path: mobile/build/app/outputs/flutter-apk/app-release.apk
           retention-days: 14
+
+      - name: Publish GitHub Release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "MEDAI Mobile Release (Latest)"
+          body: "Automated Android release build from GitHub Actions. Always contains the latest app updates and fixes."
+          files: mobile/build/app/outputs/flutter-apk/app-release.apk
+          prerelease: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

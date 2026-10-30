@@ -1,5 +1,9 @@
-from fastapi import FastAPI
+from contextlib import asynccontextmanager
+from pathlib import Path
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from sqlalchemy import text
 
 from app.api.allergies import router as allergies_router
 from app.api.assessment import router as assessment_router
@@ -19,21 +23,43 @@ from app.api.symptoms import router as symptoms_router
 from app.api.vitals import router as vitals_router
 from app.audit.middleware import AuditLogMiddleware
 from app.core.config import settings
+from app.db.models import Base
+from app.db.session import engine
+
+GITHUB_RELEASE_APK_URL = "https://github.com/aryanag21/medai/releases/latest/download/app-release.apk"
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Auto-provision tables and extensions on startup (works with any PostgreSQL/Neon DB out of the box)
+    try:
+        async with engine.begin() as conn:
+            try:
+                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+            except Exception:
+                pass
+            await conn.run_sync(Base.metadata.create_all)
+            try:
+                await conn.execute(text("ALTER TABLE symptoms ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'active';"))
+            except Exception:
+                pass
+    except Exception as e:
+        import logging
+        logging.getLogger("uvicorn.error").warning("Database startup initialization notice: %s", e)
+    yield
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="MEDAI Backend", version="0.1.0")
+    app = FastAPI(title="MEDAI Backend", version="0.1.0", lifespan=lifespan)
 
-    # Dev-only permissive CORS so the Flutter web client (served from a local dev port) can
-    # reach this API. Must be locked down to specific origins before any real deployment —
-    # tracked as a Phase 13 security-hardening item.
-    if settings.environment == "development":
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
+    # Permissive CORS so mobile and web clients can interact seamlessly
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     app.add_middleware(AuditLogMiddleware)
 
@@ -56,18 +82,19 @@ def create_app() -> FastAPI:
 
     @app.get("/download")
     async def download_apk():
-        from pathlib import Path
-        from fastapi import HTTPException
-        from fastapi.responses import FileResponse
-        apk_path = Path("C:/Users/aryan/VIT/sem-5/es/medai-apk/medai-android-release-apk/app-release.apk")
-        if not apk_path.exists():
-            raise HTTPException(status_code=404, detail="APK file not found")
-        return FileResponse(apk_path, filename="medai.apk", media_type="application/vnd.android.package-archive")
+        local_candidates = [
+            Path("C:/Users/aryan/VIT/sem-5/es/medai-apk/medai-android-release-apk/app-release.apk"),
+            Path("./app-release.apk"),
+            Path("/app/app-release.apk"),
+        ]
+        for p in local_candidates:
+            if p.exists():
+                return FileResponse(p, filename="medai.apk", media_type="application/vnd.android.package-archive")
+        return RedirectResponse(url=GITHUB_RELEASE_APK_URL, status_code=307)
 
     @app.get("/clear")
     @app.post("/clear")
     async def clear_chat_web():
-        from fastapi.responses import HTMLResponse
         from sqlalchemy import select, delete
         from app.db.session import async_session_factory
         from app.db.models import Conversation, Message, Symptom, Patient

@@ -29,7 +29,12 @@ double convertHealthConnectValue(String vitalType, double rawValue) {
 /// (app/vitals/schema.py's VitalType, app/vitals/validation.py's EXPECTED_UNITS), converted
 /// here rather than left for the server to guess.
 class HealthConnectReading {
-  HealthConnectReading({required this.type, required this.value, required this.unit, required this.timestamp});
+  HealthConnectReading({
+    required this.type,
+    required this.value,
+    required this.unit,
+    required this.timestamp,
+  });
 
   final String type;
   final double value;
@@ -42,24 +47,95 @@ class HealthConnectReading {
         'unit': unit,
         'timestamp': timestamp.toUtc().toIso8601String(),
       };
+
+  factory HealthConnectReading.fromJson(Map<String, dynamic> json) => HealthConnectReading(
+        type: json['type'] as String,
+        value: (json['value'] as num).toDouble(),
+        unit: json['unit'] as String,
+        timestamp: DateTime.parse(json['timestamp'] as String),
+      );
+}
+
+/// Deduplicates and downsamples dense high-frequency readings from companion apps like Nothing X
+/// or wearable watches. Continuous metrics (heart rate, respiratory rate) are aggregated into
+/// 1-minute buckets (taking the mean value), while discrete readings (BP, SpO2, temp) are kept intact.
+List<HealthConnectReading> bucketAndDeduplicateReadings(List<HealthConnectReading> raw) {
+  if (raw.isEmpty) return [];
+
+  // Filter out non-positive values and corrupt future timestamps
+  final nowLimit = DateTime.now().add(const Duration(minutes: 5));
+  final valid = raw.where((r) => r.value > 0 && r.timestamp.isBefore(nowLimit)).toList();
+  valid.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+
+  final processed = <HealthConnectReading>[];
+
+  // Group continuous vitals into 1-minute buckets
+  final continuousBuckets = <String, Map<String, List<double>>>{};
+  final continuousTimestamps = <String, Map<String, DateTime>>{};
+  final continuousUnits = <String, String>{};
+  final seenDiscrete = <String>{};
+
+  for (final r in valid) {
+    if (r.type == 'heart_rate' || r.type == 'respiratory_rate') {
+      continuousUnits[r.type] = r.unit;
+      final bucketKey =
+          '${r.timestamp.year}-${r.timestamp.month.toString().padLeft(2, '0')}-${r.timestamp.day.toString().padLeft(2, '0')} ${r.timestamp.hour.toString().padLeft(2, '0')}:${r.timestamp.minute.toString().padLeft(2, '0')}';
+      final typeBuckets = continuousBuckets.putIfAbsent(r.type, () => {});
+      final values = typeBuckets.putIfAbsent(bucketKey, () => []);
+      values.add(r.value);
+
+      final typeTimes = continuousTimestamps.putIfAbsent(r.type, () => {});
+      typeTimes.putIfAbsent(
+        bucketKey,
+        () => DateTime.utc(
+          r.timestamp.year,
+          r.timestamp.month,
+          r.timestamp.day,
+          r.timestamp.hour,
+          r.timestamp.minute,
+        ),
+      );
+    } else {
+      // Discrete vitals: deduplicate identical type + timestamp
+      final key = '${r.type}_${r.timestamp.millisecondsSinceEpoch}';
+      if (!seenDiscrete.contains(key)) {
+        seenDiscrete.add(key);
+        processed.add(r);
+      }
+    }
+  }
+
+  // Aggregate continuous readings
+  for (final typeEntry in continuousBuckets.entries) {
+    final type = typeEntry.key;
+    final unit = continuousUnits[type] ?? '';
+    for (final bucketEntry in typeEntry.value.entries) {
+      final bucketKey = bucketEntry.key;
+      final vals = bucketEntry.value;
+      if (vals.isEmpty) continue;
+      final avg = vals.reduce((a, b) => a + b) / vals.length;
+      final roundedAvg = (avg * 10).round() / 10.0;
+      final timestamp = continuousTimestamps[type]![bucketKey]!;
+      processed.add(
+        HealthConnectReading(
+          type: type,
+          value: roundedAvg,
+          unit: unit,
+          timestamp: timestamp,
+        ),
+      );
+    }
+  }
+
+  // Chronological sort
+  processed.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+  return processed;
 }
 
 /// The real, concrete DeviceAdapter for Google Health Connect (Phase 10).
-///
-/// This is deliberately NOT a Python class in backend/app/providers/devices/, even though
-/// that's where architecture.provider_interfaces' DeviceAdapter is defined — see that file's
-/// docstring. Health Connect's data lives in an OS-level store on the user's own device, gated
-/// by that device's own runtime permission grants; only this app process, running on that
-/// device, can ever read it. This class is vital_system.device_pipeline's
-/// DEVICE -> DEVICE_ADAPTER step, turning raw Health Connect samples into normalized readings;
-/// HealthSyncService (health_sync_service.dart) POSTs the result to /vitals/sync — the
-/// VITAL_SERVICE step this adapter's read() cannot reach on its own, since only the backend can
-/// validate/persist against the canonical patient state.
 class HealthConnectAdapter {
   final Health _health = Health();
 
-  // vital_system.initial_measurements this adapter can source from Health Connect. Steps,
-  // sleep, etc. exist in Health Connect but aren't in initial_measurements, so aren't read here.
   static const _typeMap = <HealthDataType, String>{
     HealthDataType.HEART_RATE: 'heart_rate',
     HealthDataType.BLOOD_OXYGEN: 'oxygen_saturation',
@@ -70,8 +146,6 @@ class HealthConnectAdapter {
     HealthDataType.WEIGHT: 'weight',
   };
 
-  // backend/app/vitals/validation.py's EXPECTED_UNITS — what each reading must be converted to
-  // before the backend ever sees it.
   static const _expectedUnit = <String, String>{
     'heart_rate': 'bpm',
     'oxygen_saturation': '%',
@@ -95,16 +169,14 @@ class HealthConnectAdapter {
     }
   }
 
-  /// Prompts the OS-level Health Connect permission dialog for every vital type this adapter
-  /// can read. Must succeed (or the user must grant it) before readRecent() can return data —
-  /// Health Connect silently returns nothing for ungranted types rather than erroring, so this
-  /// is a separate, explicit step rather than folded into readRecent().
+  /// Prompts the OS-level Health Connect permission dialog for every vital type this adapter can read.
   Future<bool> requestPermissions() async {
     await _ensureAvailable();
     return _health.requestAuthorization(_typeMap.keys.toList());
   }
 
-  /// Reads real Health Connect samples in the specified [startTime] to [endTime] window.
+  /// Reads real Health Connect samples in the specified [startTime] to [endTime] window,
+  /// automatically deduplicated and downsampled for network and storage efficiency.
   Future<List<HealthConnectReading>> readRange({
     required DateTime startTime,
     required DateTime endTime,
@@ -116,14 +188,14 @@ class HealthConnectAdapter {
       endTime: endTime,
     );
 
-    final readings = <HealthConnectReading>[];
+    final rawReadings = <HealthConnectReading>[];
     for (final point in points) {
       final vitalType = _typeMap[point.type];
       if (vitalType == null) continue;
       final value = point.value;
       if (value is! NumericHealthValue) continue;
 
-      readings.add(
+      rawReadings.add(
         HealthConnectReading(
           type: vitalType,
           value: convertHealthConnectValue(vitalType, value.numericValue.toDouble()),
@@ -132,7 +204,8 @@ class HealthConnectAdapter {
         ),
       );
     }
-    return readings;
+
+    return bucketAndDeduplicateReadings(rawReadings);
   }
 
   /// Reads real Health Connect samples from [lookback] ago to now.

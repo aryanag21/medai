@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -6,14 +8,10 @@ import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
 
 /// Talks to the MEDAI backend (see backend/app/api/*.py).
-///
-/// Phase 1's real auth/onboarding screens aren't built yet (see mobile/README.md), so this
-/// bootstraps a per-device account automatically on first use: no login form, no typed
-/// credentials — consistent with ux.user_must_not_be_required_to. This is temporary scaffolding
-/// for testing the Phase 2 conversation pipeline, not a real authentication UX; it is replaced
-/// once Phase 1's mobile screens (consent, onboarding, login) are built.
 class ApiClient {
-  ApiClient({String? baseUrl}) : baseUrl = baseUrl ?? _activeBaseUrl;
+  ApiClient({String? baseUrl, http.Client? client})
+      : baseUrl = baseUrl ?? _activeBaseUrl,
+        _httpClient = client ?? http.Client();
 
   static const String _defaultBaseUrl = 'https://democrat-vacancies-space-concerts.trycloudflare.com';
   static String _activeBaseUrl = _defaultBaseUrl;
@@ -22,13 +20,14 @@ class ApiClient {
   static String get defaultBaseUrl => _defaultBaseUrl;
   static String get activeBaseUrl => _activeBaseUrl;
 
+  final http.Client _httpClient;
+
   /// Reads any custom server URL saved in secure storage, updating _activeBaseUrl.
   static Future<String> getServerUrl() async {
     const storage = FlutterSecureStorage();
     final saved = await storage.read(key: _serverUrlKey);
     if (saved != null && saved.trim().isNotEmpty) {
       final trimmed = saved.trim().replaceAll(RegExp(r'/+$'), '');
-      // If the saved URL is a stale tunnel URL or emulator default, reset to the current active default.
       if (trimmed == 'https://dvds-canvas-testament-milk.trycloudflare.com' ||
           trimmed == 'http://10.0.2.2:8000' ||
           trimmed == 'http://localhost:8000') {
@@ -65,7 +64,7 @@ class ApiClient {
       target = target.replaceAll(RegExp(r'/+$'), '');
       final response = await http
           .get(Uri.parse('$target/healthz'))
-          .timeout(const Duration(seconds: 6));
+          .timeout(const Duration(seconds: 8));
       return response.statusCode == 200;
     } catch (_) {
       return false;
@@ -78,6 +77,42 @@ class ApiClient {
   static const _refreshTokenKey = 'medai_refresh_token';
   static const _deviceEmailKey = 'medai_device_email';
 
+  /// Executes an HTTP request with automatic retry for transient socket drops/resets.
+  Future<http.Response> _executeWithRetry(
+    Future<http.Response> Function() requestFn, {
+    int maxRetries = 3,
+  }) async {
+    int attempts = 0;
+    while (true) {
+      attempts++;
+      try {
+        final response = await requestFn().timeout(const Duration(seconds: 30));
+        return response;
+      } on SocketException catch (e) {
+        if (attempts >= maxRetries) {
+          throw ApiException('Network connection failed: $e. Check server connection.');
+        }
+        await Future.delayed(Duration(milliseconds: 600 * attempts));
+      } on TimeoutException {
+        if (attempts >= maxRetries) {
+          throw ApiException('Server request timed out after 30 seconds.');
+        }
+        await Future.delayed(Duration(milliseconds: 600 * attempts));
+      } on http.ClientException catch (e) {
+        if (attempts >= maxRetries) {
+          throw ApiException('Connection dropped by server or network ($e).');
+        }
+        await Future.delayed(Duration(milliseconds: 600 * attempts));
+      } catch (e) {
+        if (e is ApiException) rethrow;
+        if (attempts >= maxRetries) {
+          throw ApiException('Unexpected network error: $e');
+        }
+        await Future.delayed(Duration(milliseconds: 600 * attempts));
+      }
+    }
+  }
+
   Future<String> _ensureAccessToken() async {
     final existing = await _storage.read(key: _accessTokenKey);
     if (existing != null) return existing;
@@ -89,18 +124,15 @@ class ApiClient {
     final password = const Uuid().v4();
 
     if (email == null) {
-      // example.com is IANA-reserved for documentation/testing use, unlike .local (a reserved
-      // mDNS TLD the backend's EmailStr validator rejects outright, found live on Android:
-      // "The part after the @-sign is a special-use or reserved name").
       email = 'device-${const Uuid().v4()}@example.com';
       await _storage.write(key: _deviceEmailKey, value: email);
     }
 
-    final response = await http.post(
-      Uri.parse('$baseUrl/auth/register'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'email': email, 'password': password}),
-    );
+    final response = await _executeWithRetry(() => _httpClient.post(
+          Uri.parse('$baseUrl/auth/register'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({'email': email, 'password': password}),
+        ));
 
     if (response.statusCode != 201) {
       throw ApiException('failed to bootstrap device account: ${response.statusCode} ${response.body}');
@@ -118,30 +150,36 @@ class ApiClient {
   }
 
   Future<http.Response> _authedGet(Uri uri) async {
-    var response = await http.get(uri, headers: await _authHeaders());
-    if (response.statusCode == 401) {
-      await _storage.delete(key: _accessTokenKey);
-      response = await http.get(uri, headers: await _authHeaders());
-    }
-    return response;
+    return _executeWithRetry(() async {
+      var response = await _httpClient.get(uri, headers: await _authHeaders());
+      if (response.statusCode == 401) {
+        await _storage.delete(key: _accessTokenKey);
+        response = await _httpClient.get(uri, headers: await _authHeaders());
+      }
+      return response;
+    });
   }
 
   Future<http.Response> _authedPost(Uri uri, {Object? body}) async {
-    var response = await http.post(uri, headers: await _authHeaders(), body: body);
-    if (response.statusCode == 401) {
-      await _storage.delete(key: _accessTokenKey);
-      response = await http.post(uri, headers: await _authHeaders(), body: body);
-    }
-    return response;
+    return _executeWithRetry(() async {
+      var response = await _httpClient.post(uri, headers: await _authHeaders(), body: body);
+      if (response.statusCode == 401) {
+        await _storage.delete(key: _accessTokenKey);
+        response = await _httpClient.post(uri, headers: await _authHeaders(), body: body);
+      }
+      return response;
+    });
   }
 
   Future<http.Response> _authedPatch(Uri uri, {Object? body}) async {
-    var response = await http.patch(uri, headers: await _authHeaders(), body: body);
-    if (response.statusCode == 401) {
-      await _storage.delete(key: _accessTokenKey);
-      response = await http.patch(uri, headers: await _authHeaders(), body: body);
-    }
-    return response;
+    return _executeWithRetry(() async {
+      var response = await _httpClient.patch(uri, headers: await _authHeaders(), body: body);
+      if (response.statusCode == 401) {
+        await _storage.delete(key: _accessTokenKey);
+        response = await _httpClient.patch(uri, headers: await _authHeaders(), body: body);
+      }
+      return response;
+    });
   }
 
   Future<String> createConversation() async {
@@ -152,8 +190,6 @@ class ApiClient {
     return (jsonDecode(response.body) as Map<String, dynamic>)['id'] as String;
   }
 
-  /// ux.session_auto_preserved / resume_previous_consultation — ordered newest-first by the
-  /// backend (backend/app/api/conversations.py), so `.first` is "the conversation to resume".
   Future<List<Map<String, dynamic>>> listConversations() async {
     final response = await _authedGet(Uri.parse('$baseUrl/conversations'));
     if (response.statusCode != 200) {
@@ -172,12 +208,6 @@ class ApiClient {
     return (jsonDecode(response.body) as List).cast<Map<String, dynamic>>();
   }
 
-  /// Sends [content] as a user message. As of Phase 12, the reply is either the next
-  /// follow-up question, or — once nothing more is missing — a real validated Assessment
-  /// (architecture.canonical_pipeline's EVIDENCE_RETRIEVAL through OUTPUT_VALIDATION, run
-  /// automatically; see backend/app/api/messages.py). [SendMessageResult.isAssessment]
-  /// distinguishes the two so the UI can offer TTS playback and, for a high-risk result, a
-  /// confirmation prompt (ux.confirmation_required_when: high_risk_recommendation_considered).
   Future<SendMessageResult> sendMessage({required String conversationId, required String content}) async {
     final response = await _authedPost(
       Uri.parse('$baseUrl/messages'),
@@ -195,8 +225,6 @@ class ApiClient {
     );
   }
 
-  /// Registers a device (see backend/app/api/devices.py) and returns its id. Used by
-  /// HealthSyncService to get a device_id to sync Health Connect readings under.
   Future<String> registerDevice({required String deviceType, String? label}) async {
     final response = await _authedPost(
       Uri.parse('$baseUrl/devices'),
@@ -220,18 +248,18 @@ class ApiClient {
     return (jsonDecode(response.body) as List).cast<Map<String, dynamic>>();
   }
 
-  /// Sends a batch of already-normalized readings to POST /vitals/sync
-  /// (backend/app/api/vitals.py) and returns the per-reading accept/reject outcome.
-  /// Automatically chunks batches larger than 200 items to prevent socket drops and payload timeouts.
+  /// Sends a batch of already-normalized readings to POST /vitals/sync.
+  /// Uses a safe chunk size of 50 to prevent payload timeouts and socket aborts.
   Future<Map<String, dynamic>> syncVitals({
     required String deviceId,
     required List<Map<String, dynamic>> readings,
+    void Function(int synced, int total)? onProgress,
   }) async {
     if (readings.isEmpty) {
       return {'synced': 0, 'accepted': 0, 'rejected': 0, 'results': []};
     }
 
-    const chunkSize = 200;
+    const chunkSize = 50;
     int totalSynced = 0;
     int totalAccepted = 0;
     int totalRejected = 0;
@@ -253,6 +281,7 @@ class ApiClient {
       if (body['results'] is List) {
         allResults.addAll((body['results'] as List).cast<Map<String, dynamic>>());
       }
+      onProgress?.call(totalSynced, readings.length);
     }
 
     return {
@@ -263,7 +292,7 @@ class ApiClient {
     };
   }
 
-  /// Fetches the latest recorded sync timestamp from the server so we only sync new data.
+  /// Fetches the latest recorded sync timestamp from the server.
   Future<DateTime?> getLatestSyncTimestamp() async {
     try {
       final response = await _authedGet(Uri.parse('$baseUrl/vitals/sync/latest'));
@@ -276,7 +305,7 @@ class ApiClient {
     return null;
   }
 
-  /// Fetches 24-hour vital trends, min/max/avg, and extreme anomaly alerts
+  /// Fetches 24-hour vital trends, min/max/avg, and extreme anomaly alerts.
   Future<Map<String, dynamic>> getVitalTrends({int windowHours = 24}) async {
     final response = await _authedGet(
       Uri.parse('$baseUrl/vitals/trends').replace(queryParameters: {'window_hours': windowHours.toString()}),
@@ -287,11 +316,6 @@ class ApiClient {
     return jsonDecode(response.body) as Map<String, dynamic>;
   }
 
-  /// Re-runs the same validated pipeline as [sendMessage]'s assessment turn and returns WAV
-  /// audio of its result, from POST /assessment/speech (backend/app/api/assessment.py) —
-  /// Phase 11's voice_pipeline VALIDATED_TEXT -> TTS step. A genuinely optional companion:
-  /// a 503 here (TTS engine unavailable) must never prevent the text response — already shown
-  /// via [sendMessage] — from being available.
   Future<Uint8List> fetchAssessmentSpeech({required String conversationId}) async {
     final response = await _authedPost(
       Uri.parse('$baseUrl/assessment/speech'),
@@ -303,7 +327,6 @@ class ApiClient {
     return response.bodyBytes;
   }
 
-  /// Records a manual vital measurement directly to POST /vitals (backend/app/api/vitals.py).
   Future<Map<String, dynamic>> addVital({
     required String type,
     required double value,
@@ -334,7 +357,6 @@ class ApiClient {
     return jsonDecode(response.body) as Map<String, dynamic>;
   }
 
-  /// Fetches current patient vitals from GET /vitals (backend/app/api/vitals.py).
   Future<List<Map<String, dynamic>>> getVitals() async {
     final response = await _authedGet(Uri.parse('$baseUrl/vitals'));
     if (response.statusCode != 200) {
@@ -343,7 +365,6 @@ class ApiClient {
     return (jsonDecode(response.body) as List).cast<Map<String, dynamic>>();
   }
 
-  /// Retrieves the patient's diagnostic history and recorded vitals snapshots.
   Future<List<Map<String, dynamic>>> getDiagnosticHistory({String? status}) async {
     final uri = Uri.parse('$baseUrl/diagnostics').replace(
       queryParameters: status != null ? {'status': status} : null,
@@ -355,7 +376,6 @@ class ApiClient {
     return (jsonDecode(response.body) as List).cast<Map<String, dynamic>>();
   }
 
-  /// Updates the status of a diagnostic record (e.g. 'resolved' or 'active').
   Future<Map<String, dynamic>> updateDiagnosticStatus({
     required String recordId,
     required String status,
@@ -387,6 +407,5 @@ class SendMessageResult {
   final String? assessmentStatus;
   final String? escalation;
 
-  /// ux.confirmation_required_when: high_risk_recommendation_considered.
   bool get isHighRisk => assessmentStatus == 'urgent' || assessmentStatus == 'emergency';
 }

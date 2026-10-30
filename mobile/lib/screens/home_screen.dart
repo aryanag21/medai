@@ -23,6 +23,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final _healthSyncService = HealthSyncService();
   bool _syncing = false;
+  String? _syncStatusMessage;
   bool? _serverOnline;
   Map<String, dynamic>? _vitalTrends;
   DateTime? _lastSyncTime;
@@ -236,7 +237,10 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _syncHealthData() async {
-    setState(() => _syncing = true);
+    setState(() {
+      _syncing = true;
+      _syncStatusMessage = 'Connecting to Health Connect...';
+    });
     final messenger = ScaffoldMessenger.of(context);
     try {
       final granted = await _healthSyncService.requestPermissions();
@@ -251,7 +255,11 @@ class _HomeScreenState extends State<HomeScreen> {
         await _promptManualVitalsFallback('Health Connect permission was denied by device settings.');
         return;
       }
-      final result = await _healthSyncService.sync();
+      final result = await _healthSyncService.sync(
+        onProgress: (status) {
+          if (mounted) setState(() => _syncStatusMessage = status);
+        },
+      );
       messenger.showSnackBar(
         SnackBar(
           content: Text(
@@ -280,7 +288,12 @@ class _HomeScreenState extends State<HomeScreen> {
       );
       await _promptManualVitalsFallback('Failed to connect to Health Connect: $e');
     } finally {
-      if (mounted) setState(() => _syncing = false);
+      if (mounted) {
+        setState(() {
+          _syncing = false;
+          _syncStatusMessage = null;
+        });
+      }
     }
   }
 
@@ -330,7 +343,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       const SizedBox(width: 10),
                       const Expanded(
                         child: Text(
-                          'Cannot reach Cloudflare server. Tap settings to configure or retry.',
+                          'Cannot reach MEDAI server. Tap settings to configure or retry.',
                           style: TextStyle(fontSize: 12, color: Colors.redAccent),
                         ),
                       ),
@@ -398,11 +411,19 @@ class _HomeScreenState extends State<HomeScreen> {
                     icon: _syncing
                         ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
                         : const Icon(Icons.sync),
-                    label: const Text('Sync Health Connect data'),
+                    label: Text(_syncing ? (_syncStatusMessage ?? 'Syncing...') : 'Sync Health Connect data'),
                     style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
                     onPressed: _syncing ? null : _syncHealthData,
                   ),
                 ),
+                if (_syncStatusMessage != null && _syncing) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    _syncStatusMessage!,
+                    style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.primary),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
               ],
 
               // 24-Hour Vitals Summary and Extreme Alerts
