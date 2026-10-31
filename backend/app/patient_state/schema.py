@@ -23,6 +23,7 @@ class ExtractedSymptom(BaseModel):
     relieving_factors: str | None = None
     associated_symptoms: str | None = None
     certainty: Certainty = "user_reported"
+    status: str = "active"
 
 
 class SymptomExtractionResult(BaseModel):

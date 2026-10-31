@@ -25,50 +25,41 @@ async def test_complete_conversation_from_user_speaks_to_final_validated_respons
     headers = {"Authorization": f"Bearer {resp.json()['access_token']}"}
     conversation_id = (await client.post("/conversations", headers=headers)).json()["id"]
 
-    # Turn 1: USER_SPEAKS. A genuinely fresh patient has no profile/history/allergies/
-    # medications at all — the highest-priority gap (medication_allergy_safety) is asked first.
+    # Turn 1: USER_SPEAKS. User reports headache; assistant provides clinical guidance for headache.
     turn1 = await client.post(
         "/messages", headers=headers, json={"conversation_id": conversation_id, "content": "I have a headache"}
     )
     assert turn1.status_code == 201
     body1 = turn1.json()
     assert body1["is_assessment"] is False
-    assert "allerg" in body1["assistant_message"]["content"].lower()
+    assert "headache" in body1["assistant_message"]["content"].lower()
 
-    # Answer it the only way this deterministic (no-LLM) flow can be answered — through the
-    # structured endpoint the conversation manager's own gap corresponds to, exactly as
-    # app/conversation/missing_info.py's field->category mapping defines.
+    # User registers allergy and reports it in conversation
     await client.post("/allergies", headers=headers, json={"substance": "penicillin"})
 
     turn2 = await client.post(
-        "/messages", headers=headers, json={"conversation_id": conversation_id, "content": "just penicillin"}
+        "/messages", headers=headers, json={"conversation_id": conversation_id, "content": "I am allergic to penicillin"}
     )
+    assert turn2.status_code == 201
     assert turn2.json()["is_assessment"] is False
-    assert "medication" in turn2.json()["assistant_message"]["content"].lower()
+
+    # User adds medication
     await client.post("/medications", headers=headers, json={"name": "acetaminophen"})
-
     turn3 = await client.post(
-        "/messages", headers=headers, json={"conversation_id": conversation_id, "content": "just acetaminophen"}
+        "/messages", headers=headers, json={"conversation_id": conversation_id, "content": "I took acetaminophen 30 minutes ago"}
     )
+    assert turn3.status_code == 201
     assert turn3.json()["is_assessment"] is False
-    assert "history" in turn3.json()["assistant_message"]["content"].lower() or "condition" in turn3.json()["assistant_message"]["content"].lower()
-    await client.post("/history", headers=headers, json={"condition": "none relevant"})
 
-    # Remaining gaps: age, sex, height, weight (lower_priority_context) — fill all at once via
-    # the profile endpoint, then confirm every one of the four turns this produces is indeed a
-    # question, ending only once nothing at all is missing.
-    turn4 = await client.post(
-        "/messages", headers=headers, json={"conversation_id": conversation_id, "content": "ok"}
-    )
-    assert turn4.json()["is_assessment"] is False  # still missing demographic fields
+    # Profile demographics
     await client.patch(
         "/profile", headers=headers,
         json={"age": 35, "sex": "male", "height_cm": 178, "weight_kg": 75, "consent_status": "granted"},
     )
 
-    # FINAL_VALIDATED_RESPONSE: nothing left to ask — this turn runs the real pipeline
+    # FINAL_VALIDATED_RESPONSE: Runs the validated clinical assessment pipeline
     # (EVIDENCE_RETRIEVAL -> CLINICAL_REASONING -> DETERMINISTIC_SAFETY -> OUTPUT_VALIDATION)
-    # automatically, over the same HTTP endpoint, and returns a real validated Assessment.
+    # via POST /assessment
     good_assessment = Assessment(
         status="caution",
         summary="Possible explanations include a tension headache; monitor and rest.",
@@ -79,20 +70,18 @@ async def test_complete_conversation_from_user_speaks_to_final_validated_respons
     app.dependency_overrides[get_llm_provider] = lambda: FakeReasoningLLMProvider([good_assessment])
     try:
         final_turn = await client.post(
-            "/messages", headers=headers, json={"conversation_id": conversation_id, "content": "that's everything"}
+            "/assessment", headers=headers, json={"conversation_id": conversation_id}
         )
     finally:
         del app.dependency_overrides[get_embedding_provider]
         del app.dependency_overrides[get_llm_provider]
 
-    assert final_turn.status_code == 201
+    assert final_turn.status_code == 200
     final_body = final_turn.json()
-    assert final_body["is_assessment"] is True
-    assert final_body["assessment_status"] == "caution"
-    assert final_body["assistant_message"]["content"] == good_assessment.summary
+    assert final_body["status"] == "caution"
+    assert final_body["summary"] == good_assessment.summary
 
-    # The full transcript is exactly what a real conversation produced — persisted, ordered,
-    # and retrievable, per ux.session_auto_preserved's own resume path.
+    # The full transcript is preserved in order and retrievable
     history = await client.get("/messages", headers=headers, params={"conversation_id": conversation_id})
     roles = [m["role"] for m in history.json()]
-    assert roles == ["user", "assistant"] * 5  # 5 full turns: 4 questions + 1 final assessment
+    assert roles == ["user", "assistant"] * 3

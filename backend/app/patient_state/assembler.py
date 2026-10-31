@@ -69,6 +69,7 @@ async def build_patient_state(db: AsyncSession, patient: Patient) -> PatientStat
                 relieving_factors=s.relieving_factors,
                 associated_symptoms=s.associated_symptoms,
                 certainty=s.certainty,  # type: ignore[arg-type]
+                status=getattr(s, "status", "active"),
             )
             for s in symptom_rows
         ],

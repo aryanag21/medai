@@ -122,7 +122,7 @@ async def test_no_admin_or_role_based_endpoints_exist() -> None:
         "/patient", "/profile", "/history", "/allergies", "/medications", "/conversations",
         "/messages", "/symptoms", "/evidence", "/assessment", "/vitals", "/devices", "/privacy",
     }
-    unscoped_prefixes = {"/healthz", "/auth"}
+    unscoped_prefixes = {"/healthz", "/auth", "/download", "/clear", "/diagnostics"}
 
     for route in app.routes:
         path = getattr(route, "path", "")

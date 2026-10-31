@@ -1,40 +1,43 @@
+"""Clinical Conversational Engine for MEDAI.
+
+Overhauled according to the Comprehensive Medical Assistant Overhaul requirements:
+- Part 2: Intelligent Context Management (immediate vs relevant memory vs irrelevant/resolved).
+- Part 3: Response Prioritisation (latest message determines direction).
+- Part 4: Elimination of Repetition (no repetitive openers, no regurgitation of history).
+- Part 5: Natural, Fluent, Approachable Communication Style (adaptive response length).
+- Part 6: Intelligent, Purposeful Follow-Up Questions (at most 1 focused question, only when needed).
+- Part 7 & 8: Contextual Medical Reasoning & Safety (emergency detection, medication/allergy vigilance).
+- Part 9: Restructured, Clean System Prompt with clear priority hierarchy.
+"""
+
+from __future__ import annotations
+
 import logging
 import re
 from typing import Any
 
+from app.conversation.context_manager import (
+    classify_message_intent,
+    detect_emergency,
+    detect_resolved_symptoms,
+    filter_relevant_memory,
+    format_context_prompt_blocks,
+)
 from app.patient_state.schema import PatientState
 from app.providers.llm.base import LLMProvider
 
 logger = logging.getLogger(__name__)
 
-# Emergency red flags that require immediate emergency triage
-_EMERGENCY_PATTERNS = [
-    r"\b(crushing|radiating)\s+(chest\s+)?pain\b",
-    r"\b(chest\s+pain|pain\s+in\s+(my\s+)?chest)\b.*\b(difficulty\s+breathing|cannot\s+breathe|arm\s+pain)\b",
-    r"\b(difficulty\s+breathing|cannot\s+breathe|can\'t\s+breathe)\b.*\b(blue\s+lips|passed\s+out|chest\s+pain)\b",
-    r"\b(coughing\s+up\s+blood|hemoptysis)\b",
-    r"\b(slurred\s+speech|facial\s+droop|face\s+drooping|stroke|paralysis)\b",
-]
-
-_COMPILED_EMERGENCY = [re.compile(p, re.IGNORECASE) for p in _EMERGENCY_PATTERNS]
-
-
-def detect_emergency(user_message: str) -> tuple[bool, str | None]:
-    for pattern in _COMPILED_EMERGENCY:
-        if pattern.search(user_message):
-            matched = pattern.pattern
-            return True, f"Emergency pattern detected: {matched}"
-    return False, None
-
 
 def format_vitals_summary(vitals: dict[str, Any]) -> str:
+    """Formats recorded vitals into a concise clinical string."""
     if not vitals:
         return ""
 
     parts = []
     if "heart_rate" in vitals:
         hr = vitals["heart_rate"]["value"]
-        parts.append(f"Heart Rate: {int(hr)} bpm")
+        parts.append(f"HR: {int(hr)} bpm")
     if "oxygen_saturation" in vitals:
         spo2 = int(vitals["oxygen_saturation"]["value"])
         parts.append(f"SpO2: {spo2}%")
@@ -43,231 +46,179 @@ def format_vitals_summary(vitals: dict[str, Any]) -> str:
         temp = temp_obj["value"]
         unit = temp_obj.get("unit", "F")
         parts.append(f"Temp: {temp}°{unit}")
+    if "blood_pressure_systolic" in vitals and "blood_pressure_diastolic" in vitals:
+        sys = int(vitals["blood_pressure_systolic"]["value"])
+        dia = int(vitals["blood_pressure_diastolic"]["value"])
+        parts.append(f"BP: {sys}/{dia} mmHg")
     if "weight" in vitals:
         wt = vitals["weight"]["value"]
         unit = vitals["weight"].get("unit", "kg")
         parts.append(f"Weight: {wt} {unit}")
-    if "blood_pressure_systolic" in vitals and "blood_pressure_diastolic" in vitals:
-        sys = int(vitals["blood_pressure_systolic"]["value"])
-        dia = int(vitals["blood_pressure_diastolic"]["value"])
-        parts.append(f"BP: {sys}/{dia}")
 
     return ", ".join(parts)
 
 
-def generate_emergency_response(user_message: str) -> str:
+def generate_emergency_response(user_message: str, reason: str | None = None) -> str:
+    """Generates an immediate, clear emergency guidance response."""
     return (
-        "⚠️ **Urgent Medical Evaluation Recommended**\n\n"
-        "The symptoms you described (such as severe chest discomfort or acute breathing difficulty) "
-        "can be a sign of a cardiac or respiratory emergency.\n\n"
-        "Please don't wait: call emergency medical services immediately (such as 911, 112, or 108) "
-        "or have someone take you to the nearest emergency clinic right away. Rest in a comfortable upright position while waiting for help."
+        "⚠️ **Urgent Medical Evaluation Required**\n\n"
+        "The symptoms you describe indicate a potentially serious emergency that requires immediate medical care.\n\n"
+        "**Please take these steps immediately:**\n"
+        "• Call emergency services right now (911, 112, 108, or your local emergency number).\n"
+        "• If you are alone, contact a family member or neighbor to stay with you while help arrives.\n"
+        "• Rest in a comfortable, upright position, and avoid physical exertion.\n\n"
+        "Do not wait to see if symptoms improve on their own."
     )
 
 
-def generate_fallback_clinical_response(state: PatientState, user_message: str, prior_messages: list[dict[str, str]] | None = None) -> str:
-    text_lower = user_message.lower().strip()
-    vitals_summary = format_vitals_summary(state.vitals)
-    vitals_note = f"\n\n*(Your recorded vitals in the app look reassuring: {vitals_summary})*" if vitals_summary else ""
+def generate_intelligent_clinical_fallback(
+    state: PatientState,
+    latest_message: str,
+    intent: dict[str, Any],
+    memory: dict[str, Any],
+    vitals_summary: str = "",
+) -> str:
+    """Generates an intelligent, natural conversational fallback when the LLM is unavailable.
 
-    prior_messages = prior_messages or []
-    past_user_texts = [m.get("content", "") for m in prior_messages if m.get("role") == "user"]
+    Eliminates repetitive canned bullet dumping and adapts naturally to the classified intent.
+    """
+    text_lower = latest_message.lower().strip()
+    vitals_note = f"\n\n*(Your recorded vitals: {vitals_summary})*" if vitals_summary else ""
 
-    # 1. Meta / System / App / Server chatter (do NOT give medical advice for server checks!)
-    is_server_query = any(k in text_lower for k in ["server", "app is", "app server", "backend"]) or (
-        any(k in text_lower for k in ["slow", "lag", "running", "working"]) and any(k in text_lower for k in ["server", "app", "connection", "it"])
-    )
-    if is_server_query:
-        return (
-            "Yes, the MEDAI server and Cloudflare connection are up, running, and active!\n\n"
-            "If responses ever feel a little slow, the Cloudflare quick tunnel or mobile network latency can occasionally add a brief delay, but everything is communicating properly.\n\n"
-            "What health questions or symptoms can I help you evaluate right now?"
-        )
-
-    # 2. Identify the active symptom from the CURRENT user message first
-    # This prevents older context from overriding a new symptom the user brings up!
-    detected_current = None
-    if any(k in text_lower for k in ["throat", "swallow", "tonsil", "pharynx", "strep"]):
-        detected_current = "throat"
-    elif any(k in text_lower for k in ["back pain", "lower back", "upper back", "spine", "lumbar", "sciatica", "backache"]) or (
-        "back" in text_lower and any(w in text_lower for w in ["pain", "sitting", "hurts", "ache", "stiff", "muscle", "joint", "sit"])
+    # 1. Server / Meta queries
+    if any(k in text_lower for k in ["server", "app is", "app server", "backend"]) or (
+        any(k in text_lower for k in ["slow", "lag", "working"]) and any(k in text_lower for k in ["server", "app", "connection"])
     ):
-        detected_current = "back"
-    elif any(k in text_lower for k in ["slam", "door", "foot", "toe", "ankle", "hit my", "stub", "kick", "fall", "sprain", "bruis", "injur"]):
-        detected_current = "injury"
-    elif any(k in text_lower for k in ["cough", "cold", "congestion", "phlegm", "mucus", "sneeze", "runny nose"]):
-        detected_current = "cough"
-    elif any(k in text_lower for k in ["headache", "migraine", "head hurts", "throbbing head"]):
-        detected_current = "headache"
-    elif any(k in text_lower for k in ["fever", "chills", "feverish", "high temperature"]):
-        detected_current = "fever"
-    elif any(k in text_lower for k in ["stomach", "nausea", "vomit", "diarrhea", "belly", "heartburn", "acid reflux"]):
-        detected_current = "stomach"
-    elif any(k in text_lower for k in ["neck", "shoulder", "knee", "hip", "elbow", "wrist"]):
-        detected_current = "joint"
-
-    # If the user is asking a follow-up ("any other medicines", "what about the pain i asked", "what else"):
-    # Look back at past user messages to see what symptom they were talking about
-    active_topic = detected_current
-    is_medicine_query = any(k in text_lower for k in ["medicine", "medicines", "medication", "pill", "tablet", "syrup", "other", "take"])
-    if not active_topic and past_user_texts:
-        for prev in reversed(past_user_texts):
-            prev_l = prev.lower()
-            if any(k in prev_l for k in ["throat", "swallow", "tonsil", "strep"]):
-                active_topic = "throat_medicines" if is_medicine_query else "throat"
-                break
-            elif any(k in prev_l for k in ["back", "spine", "lumbar", "sciatica", "sitting"]):
-                active_topic = "back_medicines" if is_medicine_query else "back"
-                break
-            elif any(k in prev_l for k in ["foot", "toe", "ankle", "slam", "door", "injury", "sprain"]):
-                active_topic = "injury_medicines" if is_medicine_query else "injury"
-                break
-            elif any(k in prev_l for k in ["cough", "cold"]):
-                active_topic = "cough"
-                break
-            elif any(k in prev_l for k in ["headache"]):
-                active_topic = "headache"
-                break
-
-    # Route based on resolved active topic:
-
-    # A. Throat Pain / Sore Throat / Strep
-    if active_topic in ["throat", "throat_medicines"]:
-        more_meds = "Other effective medications and remedies for intense throat pain include:" if active_topic == "throat_medicines" else "Severe throat pain can make swallowing and speaking really difficult. Here are the most effective treatments to calm it down:"
         return (
-            f"{more_meds}\n\n"
-            "• **Anti-Inflammatory (First Choice):** **Ibuprofen (400 mg with food)** is substantially more effective than Paracetamol for throat pain because it directly reduces the intense swelling of the pharynx and tonsils.\n"
-            "• **Numbing Throat Sprays / Lozenges:** Look for lozenges containing **Benzocaine** or **Hexylresorcinol** (like Cepacol or Strepsils), or a **Phenol throat spray (Chloraseptic)**. These temporarily numb the nerve endings so swallowing is tolerable.\n"
-            "• **Warm Salt Water Gargle:** Mix 1/2 teaspoon of salt in a glass of warm water. Gargle for 30 seconds, then spit it out. Doing this 3–4 times daily draws fluid out of inflamed throat tissue.\n"
-            "• **Coating Relief:** Warm water or herbal tea with a generous spoonful of **honey** coats the sensitive mucous membranes.\n\n"
-            "**Important check:** Do you see any white spots/patches on your tonsils when you look in a mirror, and are you running a high fever? If yes, it may be bacterial strep throat, which requires a doctor's prescription for antibiotics."
+            "The MEDAI system and server connection are active and running normally. "
+            "How can I help you with your health today?"
+        )
+
+    # 2. Closers / Acknowledgments
+    if intent.get("is_closer"):
+        return "You're very welcome. Take good care of yourself, and feel free to reach back out if your symptoms change."
+
+    # 3. Greetings
+    if intent.get("is_greeting"):
+        return "Hello! I'm here to help you evaluate your symptoms and health questions. What is bothering you today?"
+
+    # 4. Symptom Resolution acknowledgment
+    if intent.get("intent") == "RESOLUTION" or memory.get("resolved_symptoms"):
+        resolved_names = ", ".join(memory.get("resolved_symptoms", []))
+        if resolved_names:
+            return f"That is great news that your {resolved_names} has resolved! Is there anything else you'd like to check or discuss today?"
+        return "I'm glad to hear that you are feeling better and that has cleared up. Is there anything else you'd like to discuss?"
+
+    # 5. Clarification update (e.g. user answered duration or severity)
+    if intent.get("intent") == "SYMPTOM_UPDATE":
+        return (
+            f"Thank you for providing that detail ({latest_message}). Knowing this helps clarify the pattern. "
+            "Are you noticing any other symptoms accompanying this, or does anything specifically aggravate or relieve it?"
             f"{vitals_note}"
         )
 
-    # B. Back Pain / Lower Back / Posture / Sitting / Sciatica
-    if active_topic in ["back", "back_medicines"]:
-        if active_topic == "back_medicines":
-            return (
-                "Besides oral pain relievers, here are other effective medications and treatments for back pain:\n\n"
-                "• **Topical Anti-Inflammatory Gel:** **Diclofenac gel (Voltaren 1%)** applied directly to the lower back provides targeted anti-inflammatory relief without upsetting your stomach.\n"
-                "• **Combined OTC Relief:** If Ibuprofen alone is insufficient, you can safely alternate **Ibuprofen (400 mg)** and **Paracetamol (500 mg)** every 3 to 4 hours (ensuring you do not exceed daily limits).\n"
-                "• **Therapeutic Heat:** A heated pad or warm bath loosens the involuntary muscle spasms around the lumbar spine.\n"
-                "• **Gentle Movement:** Complete bed rest actually stiffens back muscles. Short 3-minute walking intervals and gentle hamstring stretches are proven to speed recovery.\n\n"
-                "Are you experiencing any shooting nerve sensations down the back of your leg or numbness?"
-                f"{vitals_note}"
-            )
+    # 6. Simple Direct Question
+    if intent.get("is_simple_question"):
+        if "paracetamol" in text_lower and ("food" in text_lower or "empty" in text_lower):
+            return "Yes, Paracetamol (acetaminophen) can safely be taken with or without food. Just be sure to follow the recommended dosage and not exceed 3,000 mg in 24 hours."
+        if "ibuprofen" in text_lower and ("food" in text_lower or "empty" in text_lower):
+            return "Ibuprofen should ideally be taken with food or a glass of milk to protect your stomach lining from irritation."
+        if "blood pressure" in text_lower or "bp" in text_lower:
+            return "A normal adult resting blood pressure is generally under 120/80 mmHg. Readings between 120–129 systolic are considered elevated, while 130/80 mmHg or higher enters hypertension categories."
+
+    # 7. Topic-specific conversational answers (natural, conversational, no canned essays)
+    if any(k in text_lower for k in ["throat", "swallow", "tonsil", "strep"]):
         return (
-            "Lower back pain while sitting is very common — sitting actually increases pressure on your lumbar discs and spinal muscles by up to 40% compared to standing.\n\n"
-            "Here is how you can tell whether it's more likely muscular or joint/disc related:\n"
-            "• **Muscular tension:** Usually feels like a dull, tight ache across the lower back band. It often flares up after prolonged sitting or slouching and eases when you lie flat or walk gently.\n"
-            "• **Joint / Facet irritation:** Tends to feel stiff when rising from a chair, sharpens if you lean backwards or twist, and improves with gentle movement.\n\n"
-            "**What to do right now for relief:**\n"
-            "• **Take a standing break:** Stand up, walk around for 2 to 3 minutes, and gently stretch your hamstrings and hip flexors.\n"
-            "• **Lumbar support:** Place a small rolled towel or cushion at the curve of your lower back, and keep your knees level with your hips.\n"
-            "• **Heat:** Apply a warm heating pad to your lower back for 15–20 minutes to relax tight muscle fibers.\n"
-            "• **Medication:** If the pain is bothersome, **Ibuprofen (400 mg with food)** works well for musculoskeletal inflammation, or **Paracetamol (500–650 mg)** for straightforward pain relief.\n\n"
-            "Does the discomfort stay in your lower back, or does any pain, numbness, or tingling shoot down into your buttock or leg?"
+            "Sore throats are frequently caused by viral pharyngitis, though bacterial strep is also possible. "
+            "Warm salt water gargles and warm tea with honey help soothe the inflamed tissue. "
+            "Over-the-counter anti-inflammatories like Ibuprofen can ease the pain when swallowing.\n\n"
+            "Do you have a fever or see any white spots on your tonsils?"
             f"{vitals_note}"
         )
 
-    # C. Trauma / Foot / Toe / Ankle / Injury
-    if active_topic in ["injury", "injury_medicines"]:
+    if any(k in text_lower for k in ["back pain", "lower back", "spine", "lumbar", "sciatica"]):
         return (
-            "Ouch! That kind of impact is intensely painful — it throbs immediately and can make putting weight down really tough.\n\n"
-            "Here is the best way to handle it right now:\n"
-            "• **Elevate & Rest:** Sit or lie down and prop your foot up on a pillow above heart level to reduce the throbbing and swelling.\n"
-            "• **Ice:** Apply an ice pack (or frozen peas wrapped in a towel) for 15–20 minutes every couple of hours.\n"
-            "• **Pain & Swelling Relief:** **Ibuprofen (400 mg with food)** is very effective because it reduces both pain and inflammation. Alternatively, **Paracetamol (500–650 mg)** works well if you cannot take anti-inflammatories.\n\n"
-            "**When to get it checked:** Can you bear any weight on it, and does the area look bruised, purple, or crooked? If you cannot walk on it at all, or if a toe looks misaligned, it's best to get an X-ray to rule out a small fracture."
-        )
-
-    # D. Neck / Shoulder / Joint
-    if active_topic == "joint":
-        return (
-            "Joint and neck stiffness is often caused by muscle strain, awkward posture, or prolonged desk work.\n\n"
-            "For gentle relief:\n"
-            "• Apply a warm heating pad or take a warm shower for 15 minutes to relax tight fibers.\n"
-            "• Perform gentle range-of-motion stretches without forcing past the point of sharp pain.\n"
-            "• An anti-inflammatory like **Ibuprofen (400 mg with a snack)** helps ease joint inflammation, or a topical pain gel like **Diclofenac (Voltaren)** can be applied directly.\n\n"
-            "Did this pain start suddenly after a specific movement, or has it built up gradually over the day?"
+            "Lower back discomfort is often due to muscular strain or prolonged sitting. "
+            "Gentle walking, alternating warm heat with cold packs, and avoiding prolonged awkward posture are the most effective initial steps. "
+            "Staying gently active generally speeds recovery much more than complete bed rest.\n\n"
+            "Does the discomfort radiate down your leg, or is it confined to your lower back?"
             f"{vitals_note}"
         )
 
-    # E. Cough / Cold / Lingering respiratory
-    if active_topic == "cough":
-        is_lingering = any(w in text_lower for w in ["still", "not gone", "lingering", "days", "week"])
-        intro = (
-            "Coughs can be really stubborn and often linger for 1 to 2 weeks after an infection because the airway lining stays sensitive."
-            if is_lingering
-            else "I'm sorry you're dealing with a cough and cold. Upper respiratory bugs can really wear you down."
-        )
+    if any(k in text_lower for k in ["cough", "cold", "congestion", "phlegm"]):
         return (
-            f"{intro}\n\n"
-            "Here are the most effective ways to quiet it down:\n"
-            "• **For a dry, hacking tickle:** An over-the-counter syrup with **Dextromethorphan (10–20 mg)** helps calm the cough reflex, especially before bed.\n"
-            "• **For chest mucus:** **Guaifenesin (200–400 mg)** taken with a full glass of water thins out phlegm so it's easier to clear.\n"
-            "• **Soothing home care:** A warm cup of tea with a spoonful of **honey** (clinically proven to coat and soothe the throat) and steam from a warm shower make a noticeable difference.\n\n"
-            "Is your cough mostly dry or bringing up phlegm? And are you running any fever alongside it?"
+            "A persistent cough and congestion usually follow an upper respiratory viral illness. "
+            "Staying well hydrated, using steam or a humidifier, and taking honey before bed can significantly calm the cough reflex.\n\n"
+            "Is the cough dry or are you bringing up colored phlegm?"
             f"{vitals_note}"
         )
 
-    # F. Headache / Migraine
-    if active_topic == "headache":
+    if any(k in text_lower for k in ["headache", "migraine", "head hurts"]):
         return (
-            "I'm sorry your head is pounding. Tension, eye strain, and dehydration are the most common culprits.\n\n"
-            "For fast relief:\n"
-            "• Drink a tall glass of water and rest your eyes in a dimly lit, quiet room away from screens.\n"
-            "• An OTC pain reliever like **Paracetamol (500–1,000 mg)** or **Ibuprofen (400 mg with a snack)** usually brings prompt relief.\n"
-            "• A cool compress placed over your forehead or the back of your neck can help ease the pressure.\n\n"
-            "Is the pain throbbing or steady, and is it on one side or all over?"
+            "Headaches are commonly triggered by tension, eye strain, dehydration, or lack of sleep. "
+            "Resting in a quiet, dark room, drinking plenty of water, and applying a cool compress to your forehead can help alleviate the pain.\n\n"
+            "Did this headache start suddenly, or has it built up gradually?"
             f"{vitals_note}"
         )
 
-    # G. Fever / Chills
-    if active_topic == "fever":
+    if any(k in text_lower for k in ["rash", "skin", "itch", "hives"]):
         return (
-            "Running a fever is your body's immune system fighting off a bug, but it can leave you feeling completely exhausted.\n\n"
-            "To stay comfortable and bring it down safely:\n"
-            "• **Paracetamol (500–650 mg every 4–6 hours as needed)** is the first-line medication to reduce fever and body aches (keep within 3,000 mg in 24 hours).\n"
-            "• Stay well-hydrated with water, electrolyte drinks, or warm broths to replace fluids lost from fever.\n"
-            "• Wear lightweight, loose clothing and rest in a well-ventilated room.\n\n"
-            "What temperature have you measured, and have you noticed any other symptoms like chills or a sore throat?"
-            f"{vitals_note}"
+            "Skin irritations can arise from contact dermatitis, localized allergic reactions, or dry skin. "
+            "Keeping the area clean, avoiding harsh soaps, and applying a cool damp cloth or mild moisturizer can calm the irritation.\n\n"
+            "Where is the rash located, and does it itch or burn?"
         )
 
-    # H. Stomach / Digestive / Nausea
-    if active_topic == "stomach":
-        return (
-            "Stomach upset is miserable. The priority right now is keeping your digestive system rested while staying hydrated.\n\n"
-            "A few gentle steps:\n"
-            "• Take small, frequent sips of water, electrolyte solution, or ginger/peppermint tea.\n"
-            "• Stick to bland foods (bananas, rice, plain toast, crackers) once you feel up to eating.\n"
-            "• Avoid dairy, caffeine, and spicy or greasy foods for the next couple of days.\n\n"
-            "How long has your stomach been bothering you, and are you able to keep fluids down?"
-            f"{vitals_note}"
-        )
-
-    # I. Polite closers / Acknowledgments
-    if any(k in text_lower for k in ["thank you", "thanks", "ok", "okay", "got it", "understood", "alright", "great"]):
-        return (
-            "You're very welcome! Take good care of yourself, and feel free to reach back out anytime if your symptoms change or if you need more advice."
-        )
-
-    # J. Greetings
-    if any(k in text_lower for k in ["hello", "hi", "hey", "good morning", "good evening", "how are you"]):
-        return (
-            "Hello! I'm here to help you evaluate how you're feeling and provide medical advice. "
-            "How are you feeling today, or what symptoms are bothering you?"
-        )
-
-    # K. General Adaptive Response (NO generic paracetamol dumping!)
+    # General adaptive guidance
     return (
-        f"I understand. To help me give you specific medical advice:\n\n"
-        "• What specific discomfort or symptoms are you feeling right now?\n"
-        "• How long has this been going on, and does anything make it feel better or worse?\n\n"
-        "Tell me a little more and I will provide targeted guidance."
+        f"I hear you regarding {latest_message}. To help me evaluate this accurately, "
+        "could you describe how long this has been going on and how severe the discomfort feels?"
         f"{vitals_note}"
     )
+
+
+# Backward compatibility alias
+generate_fallback_clinical_response = lambda state, user_message, prior_messages=None: generate_intelligent_clinical_fallback(
+    state=state,
+    latest_message=user_message,
+    intent=classify_message_intent(user_message, prior_messages),
+    memory=filter_relevant_memory(user_message, classify_message_intent(user_message, prior_messages), state),
+    vitals_summary=format_vitals_summary(state.vitals),
+)
+
+
+SYSTEM_CLINICAL_POLICY = """You are MEDAI, an intelligent, empathetic, and context-aware clinical medical AI assistant.
+You speak naturally, clearly, and conversationally, like an experienced and attentive clinician in a direct consultation with a patient.
+
+CORE OPERATIONAL PRINCIPLES (Strictly Enforced):
+
+1. HIERARCHY OF PRIORITIES:
+   - Primary: Medical safety and immediate emergency identification.
+   - Second: Directly addressing the patient's latest message and their immediate question or concern.
+   - Third: Immediate conversation context and continuity from recent turns.
+   - Fourth: Historical medical memory (retrieve and mention ONLY if materially relevant to the current issue or safety).
+   - Fifth: Natural conversational tone and concise, adaptive response length.
+
+2. ADAPTIVE RESPONSE LENGTH & STYLE:
+   - Simple informational question -> 1 to 3 direct, clear sentences. Never turn a simple question into a lengthy clinical report.
+   - Direct follow-up / clarification -> Seamlessly incorporate the answer into your ongoing assessment in 1 concise paragraph.
+   - Symptom discussion -> 2 short paragraphs focusing on likely mechanisms, practical relief, and what to monitor.
+   - Emergency -> Immediate, clear instructions to seek urgent care. No casual chatter.
+
+3. ELIMINATE REPETITION & ROBOTIC SPEECH:
+   - NEVER use robotic openers such as "I understand your concern", "Thank you for sharing that", "I'm sorry to hear that you are experiencing...", or "It's important to remember". Start directly with the response.
+   - NEVER repeat the patient's entire medical history back to them.
+   - NEVER re-explain facts or precautions you already explained earlier in the conversation.
+   - Do NOT dump over-the-counter medicine dosages unless specifically asked or clinically pertinent.
+   - Do NOT end every response with a canned invitation or generic disclaimer.
+   - Only ask a follow-up question if the answer is essential for clinical decision making (at most ONE focused question). Never ask for information the patient already provided.
+
+4. MEDICAL MEMORY & RELEVANCE DISCIPLINE:
+   - Never bring up past symptoms or medical history if they have no clinical bearing on the current complaint.
+   - If a symptom is marked RESOLVED, do NOT treat it as an active issue or ask about it unless the patient brings it up.
+   - When the patient reports a symptom that could be an adverse effect or interaction with their recorded medications, address that connection cautiously and responsibly.
+   - If user statements conflict with previous records (discrepancy), politely clarify rather than silently assuming one is true.
+   - Do not invent diagnoses or make definitive medical pronouncements. Provide balanced, grounded clinical explanations.
+"""
 
 
 async def generate_conversational_reply(
@@ -278,29 +229,25 @@ async def generate_conversational_reply(
     db: Any | None = None,
     conversation_id: Any | None = None,
 ) -> tuple[str, bool, str | None, str | None]:
-    """Generates a concise, natural, human-sounding conversational clinical response."""
+    """Generates an intelligent, context-aware, non-repetitive clinical conversational reply.
 
-    # 1. Emergency Check (only for acute, dangerous presentations)
+    Returns:
+        tuple of (reply_text, is_assessment, assessment_status, escalation)
+    """
+
+    # 1. Emergency Safety Triage (Part 8)
     is_emergency, emergency_reason = detect_emergency(latest_message)
     if is_emergency:
-        logger.warning("Emergency triage triggered for message: %s", latest_message)
-        reply = generate_emergency_response(latest_message)
+        logger.warning("Emergency triage triggered for message: %s (reason=%s)", latest_message, emergency_reason)
+        reply = generate_emergency_response(latest_message, emergency_reason)
         return reply, True, "emergency", emergency_reason
 
-    # 2. Check for patient reporting resolution of prior symptoms ("cough is gone", "foot is fine")
-    text_lower = latest_message.lower()
-    resolved_detected = []
-    if any(w in text_lower for w in ["cough is gone", "cough has gone", "cough stopped", "no more cough", "cough healed", "cough is better", "cleared up"]):
-        resolved_detected.append("cough")
-    if any(w in text_lower for w in ["foot is fine", "foot healed", "bruise gone", "bruise healed", "no more foot pain", "door hit healed"]):
-        resolved_detected.append("foot")
-        resolved_detected.append("bruise")
-    if any(w in text_lower for w in ["back is fine", "back healed", "no more back pain", "back pain gone"]):
-        resolved_detected.append("back")
-    if any(w in text_lower for w in ["throat is fine", "throat healed", "no more throat pain", "throat pain gone"]):
-        resolved_detected.append("throat")
-    if any(w in text_lower for w in ["fever is gone", "no fever now", "temperature is normal", "fever broke"]):
-        resolved_detected.append("fever")
+    # 2. Classify Message Intent & Conversational State (Part 3 & 5)
+    intent = classify_message_intent(latest_message, conversation_history)
+
+    # 3. Detect and Update Resolved Symptoms dynamically (Part 2 C)
+    all_known_symptoms = [s.symptom for s in getattr(state, "symptoms", [])]
+    resolved_detected = detect_resolved_symptoms(latest_message, all_known_symptoms)
 
     if resolved_detected and db is not None and getattr(state.patient, "id", None):
         try:
@@ -308,100 +255,80 @@ async def generate_conversational_reply(
             for sym in resolved_detected:
                 await update_symptom_status_by_name(db, state.patient.id, sym, "resolved")
         except Exception as e:
-            logger.warning("Could not update resolved symptoms: %s", e)
+            logger.warning("Could not persist resolved symptoms to DB: %s", e)
 
-    # 3. Categorize active vs resolved symptoms for clinical reasoning
-    active_symptoms: list[str] = []
-    resolved_symptoms: list[str] = []
-    if db is not None and getattr(state.patient, "id", None):
-        try:
-            from sqlalchemy import select
-            from app.db.models import Symptom
-            s_res = await db.execute(select(Symptom).where(Symptom.patient_id == state.patient.id))
-            for s in s_res.scalars().all():
-                if getattr(s, "status", "active") == "resolved" or s.symptom.lower() in resolved_detected:
-                    resolved_symptoms.append(s.symptom)
-                else:
-                    active_symptoms.append(s.symptom)
-        except Exception:
-            active_symptoms = [s.symptom for s in getattr(state, "symptoms", [])]
-    else:
-        active_symptoms = [s.symptom for s in getattr(state, "symptoms", [])]
+    # 4. Filter Medical Memory based on Clinical Relevance (Part 2 B & C)
+    memory = filter_relevant_memory(
+        latest_message=latest_message,
+        intent=intent,
+        state=state,
+        resolved_symptoms=resolved_detected,
+    )
 
-    active_symptoms = list(dict.fromkeys(active_symptoms))
-    resolved_symptoms = list(dict.fromkeys(resolved_symptoms))
-
-    active_sym_str = ", ".join(active_symptoms) if active_symptoms else "None recorded"
-    resolved_sym_str = ", ".join(resolved_symptoms) if resolved_symptoms else "None"
-
-    # 4. Vital trends & Anomaly alerts
-    trends_line = ""
+    # 5. Format Vitals & Wearable Trends
+    vitals_text = format_vitals_summary(state.vitals)
+    trends_text = ""
     if db is not None and getattr(state.patient, "id", None):
         try:
             from app.vitals.trends import calculate_vital_trends, format_trends_summary
             trends_data = await calculate_vital_trends(db, state.patient.id, window_hours=24)
-            trends_summary = format_trends_summary(trends_data)
-            if trends_summary:
-                trends_line = f"• 24h Vitals Trends & Anomaly Alerts from Connected Wearables:\n{trends_summary}\n"
+            trends_text = format_trends_summary(trends_data) or ""
         except Exception as e:
-            logger.warning("Could not calculate vital trends for prompt: %s", e)
+            logger.debug("Could not calculate vital trends: %s", e)
 
-    # 5. Known patient context for prompt
-    vitals_text = format_vitals_summary(state.vitals)
-    vitals_line = f"• Current Recorded Vitals: {vitals_text}\n" if vitals_text else ""
-    allergies_str = ", ".join(a.substance for a in state.allergies)
-    allergies_line = f"• Known Allergies: {allergies_str}\n" if allergies_str else ""
-    meds_str = ", ".join(m.name for m in state.medications)
-    meds_line = f"• Current Medications: {meds_str}\n" if meds_str else ""
+    # 6. Build Context Blocks for Gemini (Part 2 & Part 9)
+    context_blocks = format_context_prompt_blocks(
+        latest_message=latest_message,
+        intent=intent,
+        memory=memory,
+        vitals_summary=vitals_text,
+        trends_summary=trends_text,
+    )
 
-    system_prompt = (
-        "You are MEDAI, a warm, highly empathetic, and exceptionally clear clinical AI physician.\n"
-        "You speak naturally and conversationally, like a trusted doctor having a direct consultation with a patient.\n\n"
-        f"{vitals_line}{trends_line}{allergies_line}{meds_line}"
-        f"• Patient Active Reported Symptoms: {active_sym_str}\n"
-        f"• Resolved Past Issues: {resolved_sym_str}\n\n"
-        "CRITICAL CLINICAL & CONVERSATIONAL RULES:\n"
-        "1. CHIEF COMPLAINT FOCUS: Give primary attention to what the patient is describing in their latest message.\n"
-        "2. CLINICAL CORRELATION & SYNDROMIC REASONING:\n"
-        "   - Clinically Related Symptoms: If the patient brings up a new symptom that could share an underlying cause or disease with an active prior symptom "
-        "(for example: cough + new fever or shortness of breath -> possible respiratory infection/bronchitis/pneumonia; abdominal pain + vomiting/diarrhea -> viral gastroenteritis; "
-        "headache + neck stiffness/light sensitivity), CONNECT THEM! Synthesize them together into a unified clinical picture.\n"
-        "   - Clinically Unrelated Symptoms: If the new complaint is clearly independent or traumatic (for example, slamming their foot into a door or stubbing a toe while also having a cough), "
-        "address the acute trauma immediately (R.I.C.E., ice, elevation, pain relief) without confusing or conflating the cough into the injury care.\n"
-        "3. NATURAL SYMPTOM STATUS CHECK & CONTINUITY:\n"
-        "   - When the patient has active prior symptoms on record (such as an earlier cough), naturally and casually ask whether it has cleared up or is still lingering "
-        "(e.g. 'How is that cough doing, by the way—has it subsided or is it still persistent?').\n"
-        "   - If they state it is resolved, acknowledge their recovery warmly. If they confirm it is persisting and relevant, incorporate that chronicity into your ongoing diagnosis.\n"
-        "4. CONCISE, SCANNABLE & HUMAN (100–145 words): Write 2 to 3 short paragraphs max with generous whitespace. Use bold text for medicine names and clear adult doses. "
-        "Speak with genuine warmth and empathy. Avoid dense essays or robotic bullet lists.\n"
-        "5. PRACTICAL RELIEF: Provide 1-2 practical, safe over-the-counter remedies with clear adult doses and actionable lifestyle/home steps.\n"
-        "6. VITAL SIGNS & WEARABLE TRENDS: If wearable trends or extreme alerts are noted above, comment gently if relevant. Never ask for vitals in chat.\n"
-        "7. CLOSE WITH ONE SHORT QUESTION: End with exactly one gentle, relevant follow-up question."
+    # 7. Assemble Conversation History (keep last 8-10 messages for full dialogue continuity)
+    history_lines = []
+    # Take up to the last 10 messages
+    recent_history = conversation_history[-10:] if len(conversation_history) > 10 else conversation_history
+    for msg in recent_history:
+        role = "Patient" if msg.get("role") == "user" else "Assistant"
+        content = msg.get("content", "").strip()
+        history_lines.append(f"{role}: {content}")
+
+    # Patient's latest message is explicitly appended
+    history_lines.append(f"Patient: {latest_message.strip()}")
+
+    user_prompt = (
+        f"{context_blocks}\n\n"
+        "=== [CONVERSATION TRANSCRIPT] ===\n"
+        + "\n".join(history_lines)
+        + "\n\nAssistant:"
     )
 
     final_reply: str | None = None
 
-    # 6. Try LLM generation
+    # 8. Call Gemini with Structured System Prompt & Temperature Tuning (Part 10)
     try:
-        history_lines = []
-        for msg in conversation_history[-4:]:
-            role = "Patient" if msg.get("role") == "user" else "Assistant"
-            history_lines.append(f"{role}: {msg.get('content', '')}")
-        history_lines.append(f"Patient: {latest_message}")
-        prompt = "\n".join(history_lines) + "\nAssistant:"
-
-        reply = await llm.generate(prompt, system=system_prompt)
+        reply = await llm.generate(user_prompt, system=SYSTEM_CLINICAL_POLICY)
         reply = reply.strip()
         if reply:
+            # Clean any artifact prefix like "Assistant:" if echoed
+            if reply.lower().startswith("assistant:"):
+                reply = reply[len("assistant:"):].strip()
             final_reply = reply
     except Exception as exc:
         logger.warning("LLM conversational generation failed (%s); using intelligent clinical fallback", exc)
 
-    # 7. Fallback to concise, empathetic clinical responder if LLM didn't produce reply
+    # 9. Fallback if LLM failed or not configured (Part 4)
     if not final_reply:
-        final_reply = generate_fallback_clinical_response(state, latest_message, conversation_history)
+        final_reply = generate_intelligent_clinical_fallback(
+            state=state,
+            latest_message=latest_message,
+            intent=intent,
+            memory=memory,
+            vitals_summary=vitals_text,
+        )
 
-    # 8. Auto-record consultation diagnostic record with vitals snapshot
+    # 10. Auto-record consultation diagnostic record if health issue discussed
     if db is not None and getattr(state.patient, "id", None) and final_reply:
         try:
             from app.diagnostics.service import auto_record_consultation_diagnosis
@@ -414,6 +341,6 @@ async def generate_conversational_reply(
                 state=state,
             )
         except Exception as e:
-            logger.warning("Could not auto-record consultation diagnosis: %s", e)
+            logger.debug("Could not auto-record consultation diagnosis: %s", e)
 
     return final_reply, False, None, None

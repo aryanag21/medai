@@ -45,10 +45,14 @@ async def db_session():
 
 @pytest_asyncio.fixture
 async def client(db_session):
+    from app.providers.embeddings import get_embedding_provider
+    from tests.fakes import FakeEmbeddingProvider
+
     async def _override_get_db():
         yield db_session
 
     app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_embedding_provider] = lambda: FakeEmbeddingProvider()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac

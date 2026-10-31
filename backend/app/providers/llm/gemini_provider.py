@@ -28,7 +28,10 @@ class GeminiProvider(LLMProvider):
         self._model = settings.gemini_model
 
     def _require_client(self) -> genai.Client:
-        key = settings.gemini_api_key or os.environ.get("GEMINI_API_KEY", "").strip()
+        if "GEMINI_API_KEY" in os.environ:
+            key = os.environ["GEMINI_API_KEY"].strip()
+        else:
+            key = settings.gemini_api_key.strip()
         if not key:
             raise LLMNotConfiguredError(
                 "GEMINI_API_KEY is not set — see .env.example. No response was fabricated."
@@ -40,7 +43,7 @@ class GeminiProvider(LLMProvider):
 
     async def generate(self, prompt: str, *, system: str | None = None) -> str:
         client = self._require_client()
-        candidate_models = [self._model] + [m for m in ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash"] if m != self._model]
+        candidate_models = [self._model] + [m for m in ["gemini-3.5-flash", "gemini-3.8-flash", "gemini-3.7-flash"] if m != self._model]
 
         last_exc: Exception | None = None
         for model_id in candidate_models:
@@ -64,7 +67,7 @@ class GeminiProvider(LLMProvider):
 
     async def structured_generate(self, prompt: str, schema: type[T], *, system: str | None = None) -> T:
         client = self._require_client()
-        candidate_models = [self._model] + [m for m in ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash"] if m != self._model]
+        candidate_models = [self._model] + [m for m in ["gemini-3.5-flash", "gemini-3.8-flash", "gemini-3.7-flash"] if m != self._model]
 
         last_exc: Exception | None = None
         for model_id in candidate_models:

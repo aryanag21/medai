@@ -107,10 +107,12 @@ async def test_assessment_rejects_llm_output_that_ignores_a_real_escalating_vita
         escalation="Seek emergency care immediately.",
     )
     app.dependency_overrides[get_llm_provider] = lambda: FakeReasoningLLMProvider([ignores_escalation, correct])
+    app.dependency_overrides[get_embedding_provider] = lambda: FakeEmbeddingProvider()
     try:
         resp = await client.post("/assessment", headers=headers, json={"conversation_id": conversation_id})
     finally:
         del app.dependency_overrides[get_llm_provider]
+        del app.dependency_overrides[get_embedding_provider]
 
     assert resp.status_code == 200
     assert resp.json()["status"] == "emergency"
@@ -122,10 +124,12 @@ async def test_assessment_falls_back_when_llm_not_configured(client: AsyncClient
     conversation_id = await _conversation_with_symptom(client, headers, db_session)
 
     app.dependency_overrides[get_llm_provider] = lambda: NotConfiguredLLMProvider()
+    app.dependency_overrides[get_embedding_provider] = lambda: FakeEmbeddingProvider()
     try:
         resp = await client.post("/assessment", headers=headers, json={"conversation_id": conversation_id})
     finally:
         del app.dependency_overrides[get_llm_provider]
+        del app.dependency_overrides[get_embedding_provider]
 
     assert resp.status_code == 200
     body = resp.json()
