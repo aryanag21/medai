@@ -255,17 +255,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             ),
             FilledButton(
               onPressed: () async {
+                final messenger = ScaffoldMessenger.of(context);
+                final nav = Navigator.of(ctx);
                 final newUrl = controller.text.trim();
                 if (newUrl.isNotEmpty) {
                   await ApiClient.setServerUrl(newUrl);
                   await _checkConnection();
                   if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    messenger.showSnackBar(
                       SnackBar(content: Text('Server URL set to: ${ApiClient.activeBaseUrl}')),
                     );
                   }
                 }
-                if (ctx.mounted) Navigator.of(ctx).pop();
+                nav.pop();
               },
               child: const Text('Save'),
             ),

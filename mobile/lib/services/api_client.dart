@@ -78,7 +78,6 @@ class ApiClient {
   final _storage = const FlutterSecureStorage();
   static const _accessTokenKey = 'medai_access_token';
   static const _refreshTokenKey = 'medai_refresh_token';
-  static const _deviceEmailKey = 'medai_device_email';
 
   /// Executes an HTTP request with automatic retry for transient socket drops/resets.
   Future<http.Response> _executeWithRetry(

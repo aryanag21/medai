@@ -75,16 +75,21 @@ class _DiagnosticHistoryScreenState extends State<DiagnosticHistoryScreen> {
 
     if (confirm != true) return;
 
+    final messenger = ScaffoldMessenger.of(context);
     try {
       await _apiClient.updateDiagnosticStatus(recordId: recordId, status: newStatus);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Diagnosis updated to $newStatus.')),
-      );
+      if (mounted) {
+        messenger.showSnackBar(
+          SnackBar(content: Text('Diagnosis updated to $newStatus.')),
+        );
+      }
       await _loadHistory();
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to update status: $e')),
-      );
+      if (mounted) {
+        messenger.showSnackBar(
+          SnackBar(content: Text('Failed to update status: $e')),
+        );
+      }
     }
   }
 
