@@ -20,7 +20,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final _healthSyncService = HealthSyncService();
   bool _syncing = false;
   String? _syncStatusMessage;
@@ -34,13 +34,41 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initConnection();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _checkConnection();
+      _autoSyncHealthData();
+    }
   }
 
   Future<void> _initConnection() async {
     await ApiClient.getServerUrl();
     await _checkConnection();
     await _loadVitalsOverview();
+    _autoSyncHealthData();
+  }
+
+  Future<void> _autoSyncHealthData() async {
+    if (!_healthConnectSupported || _syncing) return;
+    try {
+      final granted = await _healthSyncService.requestPermissions();
+      if (!granted) return;
+      await _healthSyncService.sync();
+      await _loadVitalsOverview();
+    } catch (_) {
+      // Non-blocking background auto sync
+    }
   }
 
   Future<void> _checkConnection() async {
@@ -404,18 +432,41 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
 
                 if (_healthConnectSupported) ...[
-                const SizedBox(height: 12),
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton.icon(
-                    icon: _syncing
-                        ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                        : const Icon(Icons.sync),
-                    label: Text(_syncing ? (_syncStatusMessage ?? 'Syncing...') : 'Sync Health Connect data'),
-                    style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
-                    onPressed: _syncing ? null : _syncHealthData,
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.teal.withAlpha(20),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.teal.shade200),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(Icons.autorenew_rounded, size: 18, color: Colors.teal.shade700),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _lastSyncTime != null
+                                ? 'Auto-Sync Active • Last updated ${_formatTime(_lastSyncTime!)}'
+                                : 'Auto-Sync Active • Connected to Health Connect',
+                            style: TextStyle(fontSize: 12, color: Colors.teal.shade900, fontWeight: FontWeight.w500),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      icon: _syncing
+                          ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.sync),
+                      label: Text(_syncing ? (_syncStatusMessage ?? 'Syncing...') : 'Refresh Health Connect Data'),
+                      style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
+                      onPressed: _syncing ? null : _syncHealthData,
+                    ),
+                  ),
                 if (_syncStatusMessage != null && _syncing) ...[
                   const SizedBox(height: 6),
                   Text(

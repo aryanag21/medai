@@ -58,6 +58,52 @@ def format_vitals_summary(vitals: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
+def format_detailed_vitals_report(vitals: dict[str, Any]) -> str:
+    """Formats recorded vitals into a structured, patient-friendly report with clinical normal ranges."""
+    if not vitals:
+        return ""
+
+    lines = []
+    if "heart_rate" in vitals:
+        hr = int(vitals["heart_rate"]["value"])
+        status = "Normal" if 60 <= hr <= 100 else ("Elevated (Tachycardia)" if hr > 100 else "Low (Bradycardia)")
+        lines.append(f"• **Heart Rate**: {hr} bpm (Normal resting: 60–100 bpm — {status})")
+
+    if "blood_pressure_systolic" in vitals and "blood_pressure_diastolic" in vitals:
+        sys = int(vitals["blood_pressure_systolic"]["value"])
+        dia = int(vitals["blood_pressure_diastolic"]["value"])
+        if sys < 120 and dia < 80:
+            bp_status = "Normal"
+        elif 120 <= sys <= 129 and dia < 80:
+            bp_status = "Elevated"
+        else:
+            bp_status = "Stage 1/2 High"
+        lines.append(f"• **Blood Pressure**: {sys}/{dia} mmHg (Normal: <120/80 mmHg — {bp_status})")
+
+    if "oxygen_saturation" in vitals:
+        spo2 = int(vitals["oxygen_saturation"]["value"])
+        spo2_status = "Normal" if spo2 >= 95 else "Low (Attention Required)"
+        lines.append(f"• **Oxygen Saturation (SpO2)**: {spo2}% (Normal: 95–100% — {spo2_status})")
+
+    if "body_temperature" in vitals or "temperature" in vitals:
+        temp_obj = vitals.get("body_temperature") or vitals.get("temperature")
+        temp = temp_obj["value"]
+        unit = temp_obj.get("unit", "F")
+        temp_status = "Fever" if temp >= 100.4 else "Normal"
+        lines.append(f"• **Body Temperature**: {temp}°{unit} (Normal: 97.8–99.1°F — {temp_status})")
+
+    if "respiratory_rate" in vitals:
+        rr = int(vitals["respiratory_rate"]["value"])
+        lines.append(f"• **Respiratory Rate**: {rr} breaths/min (Normal: 12–20 breaths/min)")
+
+    if "weight" in vitals:
+        wt = vitals["weight"]["value"]
+        unit = vitals["weight"].get("unit", "kg")
+        lines.append(f"• **Weight**: {wt} {unit}")
+
+    return "\n".join(lines)
+
+
 def generate_emergency_response(user_message: str, reason: str | None = None) -> str:
     """Generates an immediate, clear emergency guidance response."""
     return (
@@ -115,6 +161,39 @@ def generate_intelligent_clinical_fallback(
             f"Thank you for providing that detail ({latest_message}). Knowing this helps clarify the pattern. "
             "Are you noticing any other symptoms accompanying this, or does anything specifically aggravate or relieve it?"
             f"{vitals_note}"
+        )
+
+    # 5.5 Vitals Query
+    if intent.get("intent") == "VITALS_QUERY" or intent.get("is_vitals_query"):
+        vitals_detailed = format_detailed_vitals_report(state.vitals)
+        if vitals_detailed:
+            return (
+                "Here are your latest recorded vital signs:\n\n"
+                f"{vitals_detailed}\n\n"
+                "All metrics are recorded and monitored against clinical reference ranges. "
+                "How are you feeling right now?"
+            )
+        elif vitals_summary:
+            return (
+                "Here are your latest recorded vital signs:\n\n"
+                f"• {vitals_summary}\n\n"
+                "Your readings are logged and up to date. Is there a specific reading or symptom you'd like to discuss?"
+            )
+        else:
+            return (
+                "You currently have no vital signs on record. "
+                "If you wear a connected smartwatch (via Health Connect), readings will sync automatically. "
+                "You can also simply tell me your readings right here (for example: 'My heart rate is 72 and blood pressure is 120/80') "
+                "and I will update your chart right away."
+            )
+
+    # 5.6 Vitals Update confirmation
+    if intent.get("intent") == "VITALS_UPDATE" or intent.get("is_vitals_update"):
+        vitals_detailed = format_detailed_vitals_report(state.vitals)
+        return (
+            "I've updated your chart with your vital signs:\n\n"
+            f"{vitals_detailed if vitals_detailed else (vitals_summary or 'Readings have been recorded successfully.')}\n\n"
+            "Thank you for keeping your health record updated. How can I assist you with your health today?"
         )
 
     # 6. Simple Direct Question

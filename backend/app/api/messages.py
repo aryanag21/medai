@@ -169,6 +169,19 @@ async def send_message(
     except Exception:
         pass
 
+    # Ingest any vital signs directly reported in the chat message
+    try:
+        from app.vitals.chat_extractor import extract_vitals_from_chat
+        from app.vitals.service import ingest_measurement
+
+        chat_vitals = extract_vitals_from_chat(payload.content)
+        for v in chat_vitals:
+            await ingest_measurement(db, patient, v)
+        if chat_vitals:
+            await db.flush()
+    except Exception:
+        pass
+
     state = await build_patient_state(db, patient)
     history = [{"role": m.role, "content": m.content} for m in prior_messages]
 

@@ -242,6 +242,57 @@ def classify_message_intent(
             "summary": "Reporting resolution of a prior symptom",
         }
 
+    # 3.5 Check for vitals inquiry or in-chat vitals update
+    is_vitals_query = any(
+        phrase in text_l
+        for phrase in [
+            "my vitals", "the vitals", "show vitals", "show my vitals", "check vitals", "check my vitals",
+            "what are my vitals", "give me my vitals", "tell me my vitals", "how are my vitals",
+            "how is my vitals", "my heart rate", "my pulse", "my blood pressure", "my bp",
+            "my spo2", "my oxygen", "my temperature", "check my pulse", "check my heart rate",
+            "vitals summary", "current vitals", "vitals status", "latest vitals"
+        ]
+    )
+    is_vitals_update = any(
+        phrase in text_l
+        for phrase in [
+            "update vitals", "update my vitals", "my heart rate is", "heart rate is",
+            "my bp is", "blood pressure is", "my pulse is", "my temperature is",
+            "my temp is", "my spo2 is", "my oxygen is", "recorded vitals", "new vitals"
+        ]
+    ) or (
+        bool(re.search(r"\b(\d{2,3})\s*(?:/|\s+over\s+)\s*(\d{2,3})\b", text_l)) and
+        any(k in text_l for k in ["bp", "blood pressure", "heart", "pulse", "hr", "vitals", "reading"])
+    )
+
+    if is_vitals_query:
+        return {
+            "intent": "VITALS_QUERY",
+            "is_emergency": False,
+            "is_simple_question": True,
+            "is_greeting": False,
+            "is_closer": False,
+            "is_medication_query": False,
+            "is_vitals_query": True,
+            "is_vitals_update": is_vitals_update,
+            "is_update": is_vitals_update,
+            "summary": "Requesting a status report of their vital signs",
+        }
+
+    if is_vitals_update:
+        return {
+            "intent": "VITALS_UPDATE",
+            "is_emergency": False,
+            "is_simple_question": False,
+            "is_greeting": False,
+            "is_closer": False,
+            "is_medication_query": False,
+            "is_vitals_query": False,
+            "is_vitals_update": True,
+            "is_update": True,
+            "summary": "Reporting or updating vital sign measurements in chat",
+        }
+
     # 4. Medication query check
     is_med_query = any(k in text_l for k in [
         "medicine", "medication", "pill", "tablet", "syrup", "can i take", "should i take",
@@ -440,7 +491,11 @@ def format_context_prompt_blocks(
     blocks.append("=== [1. IMMEDIATE CONSULTATION FOCUS - HIGHEST PRIORITY] ===")
     blocks.append(f"Patient's Latest Message: \"{latest_message}\"")
     blocks.append(f"Conversation State: {intent.get('summary', 'Ongoing consultation')}")
-    if intent.get("is_simple_question"):
+    if intent.get("intent") == "VITALS_QUERY":
+        blocks.append("Direct Instruction: The patient is explicitly asking for their vital signs. Provide a direct, reassuring, conversational breakdown of their latest recorded vitals with normal clinical ranges and clinical interpretation. If no vitals are on record, explain how to sync or provide them.")
+    elif intent.get("intent") == "VITALS_UPDATE":
+        blocks.append("Direct Instruction: The patient just reported new vital sign measurements. Confirm that their vitals have been successfully updated in their chart, summarize the readings, and provide clinical feedback on the numbers.")
+    elif intent.get("is_simple_question"):
         blocks.append("Direct Instruction: Answer this question directly, concisely, and clearly. Do NOT turn it into a full clinical report or symptom interview.")
     elif intent.get("intent") == "SYMPTOM_UPDATE":
         blocks.append("Direct Instruction: Seamlessly incorporate this new detail into your ongoing assessment. Do NOT repeat previous explanations or restart the conversation.")

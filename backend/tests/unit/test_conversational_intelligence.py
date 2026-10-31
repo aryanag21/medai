@@ -343,3 +343,55 @@ async def test_scenario_10_multi_turn_natural_progression():
         history.append({"role": "assistant", "content": reply})
 
     assert len(history) == 18  # 9 user turns + 9 assistant turns = 18 exchanges
+
+
+# ==============================================================================
+# TEST SCENARIO: Vitals Query and In-Chat Direct Vitals Update
+# ==============================================================================
+@pytest.mark.asyncio
+async def test_vitals_query_with_existing_records():
+    state = make_patient_state(
+        vitals={
+            "heart_rate": {"value": 72.0, "unit": "bpm"},
+            "oxygen_saturation": {"value": 98.0, "unit": "%"},
+            "blood_pressure_systolic": {"value": 120.0, "unit": "mmHg"},
+            "blood_pressure_diastolic": {"value": 80.0, "unit": "mmHg"},
+        }
+    )
+    latest_msg = "What are my vitals right now?"
+
+    intent = classify_message_intent(latest_msg)
+    assert intent.get("is_vitals_query") is True
+
+    reply = generate_intelligent_clinical_fallback(state, latest_msg, intent, {})
+    assert "72 bpm" in reply
+    assert "120/80" in reply
+    assert "98%" in reply
+
+
+@pytest.mark.asyncio
+async def test_vitals_query_with_no_records_explains_chat_and_auto_sync():
+    state = make_patient_state(vitals={})
+    latest_msg = "Show me my vitals"
+
+    intent = classify_message_intent(latest_msg)
+    assert intent.get("is_vitals_query") is True
+
+    reply = generate_intelligent_clinical_fallback(state, latest_msg, intent, {})
+    assert "no vital signs on record" in reply.lower()
+    assert "sync automatically" in reply.lower()
+
+
+@pytest.mark.asyncio
+async def test_in_chat_vitals_extraction():
+    from app.vitals.chat_extractor import extract_vitals_from_chat
+
+    msg = "Please update my vitals: heart rate 76 bpm, BP is 122/78 mmHg, and SpO2 99%"
+    measurements = extract_vitals_from_chat(msg)
+
+    types = {m.type: m.value for m in measurements}
+    assert types["heart_rate"] == 76.0
+    assert types["blood_pressure_systolic"] == 122.0
+    assert types["blood_pressure_diastolic"] == 78.0
+    assert types["oxygen_saturation"] == 99.0
+

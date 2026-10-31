@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import '../services/api_client.dart';
+import '../services/health_sync_service.dart';
 import '../services/speech_playback_service.dart';
 import 'diagnostic_history_screen.dart';
 import 'manual_vitals_screen.dart';
@@ -31,13 +32,21 @@ class ChatEntry {
 /// text_always_available requirement, typed text is always an equally valid way to send a
 /// message — this also makes the flow testable without a live microphone.
 class ConversationScreen extends StatefulWidget {
-  const ConversationScreen({super.key, this.apiClient, this.speechPlaybackService});
+  const ConversationScreen({
+    super.key,
+    this.apiClient,
+    this.speechPlaybackService,
+    this.healthSyncService,
+  });
 
   /// Injectable for widget tests; defaults to a real ApiClient otherwise.
   final ApiClient? apiClient;
 
   /// Injectable for widget tests; defaults to a real SpeechPlaybackService otherwise.
   final SpeechPlaybackService? speechPlaybackService;
+
+  /// Injectable for widget tests; defaults to HealthSyncService otherwise.
+  final HealthSyncService? healthSyncService;
 
   @override
   State<ConversationScreen> createState() => _ConversationScreenState();
@@ -46,6 +55,8 @@ class ConversationScreen extends StatefulWidget {
 class _ConversationScreenState extends State<ConversationScreen> {
   late final ApiClient _apiClient = widget.apiClient ?? ApiClient();
   late final SpeechPlaybackService _playback = widget.speechPlaybackService ?? SpeechPlaybackService();
+  late final HealthSyncService _healthSyncService =
+      widget.healthSyncService ?? HealthSyncService(apiClient: _apiClient);
   final _speech = stt.SpeechToText();
   final _textController = TextEditingController();
   final _messages = <ChatEntry>[];
@@ -68,6 +79,7 @@ class _ConversationScreenState extends State<ConversationScreen> {
   }
 
   Future<void> _init() async {
+    _autoSyncVitalsSilently();
     try {
       // ux.session_auto_preserved / resume_previous_consultation: resume the most recent
       // conversation rather than always starting a new one, so a patient's consultation
@@ -155,6 +167,9 @@ class _ConversationScreenState extends State<ConversationScreen> {
     _textController.clear();
     _scrollToBottom();
 
+    // Auto-sync wearable vitals in background before replying
+    await _autoSyncVitalsForMessage(text);
+
     SendMessageResult? result;
     try {
       // Phase 12: once nothing more is missing, this reply is a real validated Assessment
@@ -174,6 +189,36 @@ class _ConversationScreenState extends State<ConversationScreen> {
     if (result != null && result.isHighRisk && mounted) {
       await _showHighRiskConfirmation(result.escalation ?? result.content);
     }
+  }
+
+  Future<void> _autoSyncVitalsForMessage(String text) async {
+    final textLower = text.toLowerCase();
+    final isVitalsQuery = textLower.contains('vital') ||
+        textLower.contains('heart rate') ||
+        textLower.contains('pulse') ||
+        textLower.contains('blood pressure') ||
+        textLower.contains('bp') ||
+        textLower.contains('spo2') ||
+        textLower.contains('oxygen') ||
+        textLower.contains('temp');
+
+    if (isVitalsQuery) {
+      try {
+        await _healthSyncService.sync().timeout(const Duration(milliseconds: 1500));
+      } catch (_) {
+        // Safe fallback without blocking message send
+      }
+    } else {
+      _autoSyncVitalsSilently();
+    }
+  }
+
+  void _autoSyncVitalsSilently() {
+    Future<void>(() async {
+      try {
+        await _healthSyncService.sync();
+      } catch (_) {}
+    });
   }
 
   /// ux.confirmation_required_when: high_risk_recommendation_considered. A modal, non-dismiss-
