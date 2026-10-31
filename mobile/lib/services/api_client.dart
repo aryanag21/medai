@@ -10,8 +10,11 @@ import 'package:uuid/uuid.dart';
 /// Talks to the MEDAI backend (see backend/app/api/*.py).
 class ApiClient {
   ApiClient({String? baseUrl, http.Client? client})
-      : baseUrl = baseUrl ?? _activeBaseUrl,
+      : _customBaseUrl = baseUrl,
         _httpClient = client ?? http.Client();
+
+  final String? _customBaseUrl;
+  String get baseUrl => _customBaseUrl ?? _activeBaseUrl;
 
   static const String _defaultBaseUrl = 'https://rental-aim-anywhere-centres.trycloudflare.com';
   static String _activeBaseUrl = _defaultBaseUrl;
@@ -28,9 +31,10 @@ class ApiClient {
     final saved = await storage.read(key: _serverUrlKey);
     if (saved != null && saved.trim().isNotEmpty) {
       final trimmed = saved.trim().replaceAll(RegExp(r'/+$'), '');
-      if (trimmed == 'https://dvds-canvas-testament-milk.trycloudflare.com' ||
-          trimmed == 'http://10.0.2.2:8000' ||
-          trimmed == 'http://localhost:8000') {
+      if (trimmed.contains('trycloudflare.com') && trimmed != _defaultBaseUrl) {
+        _activeBaseUrl = _defaultBaseUrl;
+        await storage.write(key: _serverUrlKey, value: _defaultBaseUrl);
+      } else if (trimmed == 'http://10.0.2.2:8000' || trimmed == 'http://localhost:8000') {
         _activeBaseUrl = _defaultBaseUrl;
         await storage.write(key: _serverUrlKey, value: _defaultBaseUrl);
       } else {
@@ -64,14 +68,13 @@ class ApiClient {
       target = target.replaceAll(RegExp(r'/+$'), '');
       final response = await http
           .get(Uri.parse('$target/healthz'))
-          .timeout(const Duration(seconds: 8));
+          .timeout(const Duration(seconds: 12));
       return response.statusCode == 200;
     } catch (_) {
       return false;
     }
   }
 
-  final String baseUrl;
   final _storage = const FlutterSecureStorage();
   static const _accessTokenKey = 'medai_access_token';
   static const _refreshTokenKey = 'medai_refresh_token';
@@ -120,13 +123,8 @@ class ApiClient {
   }
 
   Future<String> _bootstrapDeviceAccount() async {
-    var email = await _storage.read(key: _deviceEmailKey);
+    final email = 'device-${const Uuid().v4()}@example.com';
     final password = const Uuid().v4();
-
-    if (email == null) {
-      email = 'device-${const Uuid().v4()}@example.com';
-      await _storage.write(key: _deviceEmailKey, value: email);
-    }
 
     final response = await _executeWithRetry(() => _httpClient.post(
           Uri.parse('$baseUrl/auth/register'),

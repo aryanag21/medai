@@ -125,6 +125,21 @@ class HealthSyncService {
         final chunkLatest = chunk.map((r) => r.timestamp).reduce((a, b) => a.isAfter(b) ? a : b);
         await _storage.write(key: _lastSyncTimeKey, value: chunkLatest.toIso8601String());
       } catch (e) {
+        // Auto-recover if device registration was lost or invalidated on server
+        if (e.toString().contains('404') || e.toString().contains('device not found')) {
+          await _storage.delete(key: _deviceIdKey);
+          try {
+            final newDevId = await _ensureDeviceId();
+            final retryResp = await _apiClient.syncVitals(
+              deviceId: newDevId,
+              readings: [for (final r in chunk) r.toJson()],
+            );
+            totalSynced += (retryResp['synced'] as int? ?? 0);
+            totalAccepted += (retryResp['accepted'] as int? ?? 0);
+            totalRejected += (retryResp['rejected'] as int? ?? 0);
+            continue;
+          } catch (_) {}
+        }
         if (totalSynced > 0) {
           return HealthSyncResult(
             synced: totalSynced,

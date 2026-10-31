@@ -80,6 +80,15 @@ def create_app() -> FastAPI:
     app.include_router(devices_router)
     app.include_router(privacy_router)
 
+    @app.get("/")
+    async def root():
+        return {
+            "status": "ok",
+            "app": "MEDAI Backend",
+            "version": "0.1.0",
+            "healthz": "/healthz",
+        }
+
     @app.get("/download")
     async def download_apk():
         local_candidates = [

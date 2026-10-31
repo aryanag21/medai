@@ -54,7 +54,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Future<void> _initConnection() async {
     await ApiClient.getServerUrl();
-    await _checkConnection();
+    var online = await ApiClient.testConnection();
+    // Auto-heal if saved URL is offline but defaultBaseUrl is online
+    if (!online && ApiClient.activeBaseUrl != ApiClient.defaultBaseUrl) {
+      final defaultOnline = await ApiClient.testConnection(ApiClient.defaultBaseUrl);
+      if (defaultOnline) {
+        await ApiClient.setServerUrl(ApiClient.defaultBaseUrl);
+        online = true;
+      }
+    }
+    if (mounted) {
+      setState(() => _serverOnline = online);
+    }
     await _loadVitalsOverview();
     _autoSyncHealthData();
   }
