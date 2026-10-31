@@ -43,7 +43,7 @@ class GeminiProvider(LLMProvider):
 
     async def generate(self, prompt: str, *, system: str | None = None) -> str:
         client = self._require_client()
-        candidate_models = [self._model] + [m for m in ["gemini-3.5-flash", "gemini-3.8-flash", "gemini-3.7-flash"] if m != self._model]
+        candidate_models = [self._model] + [m for m in ["gemini-3.5-flash-lite", "gemini-flash-lite-latest", "gemini-3.5-flash", "gemini-3.8-flash"] if m != self._model]
 
         last_exc: Exception | None = None
         for model_id in candidate_models:
@@ -67,7 +67,7 @@ class GeminiProvider(LLMProvider):
 
     async def structured_generate(self, prompt: str, schema: type[T], *, system: str | None = None) -> T:
         client = self._require_client()
-        candidate_models = [self._model] + [m for m in ["gemini-3.5-flash", "gemini-3.8-flash", "gemini-3.7-flash"] if m != self._model]
+        candidate_models = [self._model] + [m for m in ["gemini-3.5-flash-lite", "gemini-flash-lite-latest", "gemini-3.5-flash", "gemini-3.8-flash"] if m != self._model]
 
         last_exc: Exception | None = None
         for model_id in candidate_models:

@@ -124,47 +124,31 @@ def generate_intelligent_clinical_fallback(
     memory: dict[str, Any],
     vitals_summary: str = "",
 ) -> str:
-    """Generates an intelligent, natural conversational fallback when the LLM is unavailable.
-
-    Eliminates repetitive canned bullet dumping and adapts naturally to the classified intent.
-    """
     text_lower = latest_message.lower().strip()
     vitals_note = f"\n\n*(Your recorded vitals: {vitals_summary})*" if vitals_summary else ""
 
-    # 1. Server / Meta queries
+    # 1. System / Connection query
     if any(k in text_lower for k in ["server", "app is", "app server", "backend"]) or (
-        any(k in text_lower for k in ["slow", "lag", "working"]) and any(k in text_lower for k in ["server", "app", "connection"])
+        any(k in text_lower for k in ["slow", "lag", "running", "working"]) and any(k in text_lower for k in ["server", "app", "connection"])
     ):
         return (
-            "The MEDAI system and server connection are active and running normally. "
-            "How can I help you with your health today?"
+            "The MEDAI system is online and active! "
+            "How are you feeling right now, and what health symptoms or concerns can I help you with today?"
         )
 
-    # 2. Closers / Acknowledgments
-    if intent.get("is_closer"):
-        return "You're very welcome. Take good care of yourself, and feel free to reach back out if your symptoms change."
+    # 2. Simple Direct Question (e.g. medication with food)
+    if intent.get("is_simple_question") or intent.get("intent") == "SIMPLE_QUESTION":
+        if "paracetamol" in text_lower and ("food" in text_lower or "empty" in text_lower):
+            return "Yes, Paracetamol (acetaminophen) can safely be taken with or without food. Just be sure to follow the recommended dosage and not exceed 3,000 mg in 24 hours."
+        if "ibuprofen" in text_lower and ("food" in text_lower or "empty" in text_lower):
+            return "Ibuprofen should ideally be taken with food or a glass of milk to protect your stomach lining from irritation."
+        if "blood pressure" in text_lower or "bp" in text_lower:
+            return "A normal adult resting blood pressure is generally under 120/80 mmHg. Readings between 120–129 systolic are considered elevated, while 130/80 mmHg or higher enters hypertension categories."
 
-    # 3. Greetings
-    if intent.get("is_greeting"):
-        return "Hello! I'm here to help you evaluate your symptoms and health questions. What is bothering you today?"
-
-    # 4. Symptom Resolution acknowledgment
-    if intent.get("intent") == "RESOLUTION" or memory.get("resolved_symptoms"):
-        resolved_names = ", ".join(memory.get("resolved_symptoms", []))
-        if resolved_names:
-            return f"That is great news that your {resolved_names} has resolved! Is there anything else you'd like to check or discuss today?"
-        return "I'm glad to hear that you are feeling better and that has cleared up. Is there anything else you'd like to discuss?"
-
-    # 5. Clarification update (e.g. user answered duration or severity)
-    if intent.get("intent") == "SYMPTOM_UPDATE":
-        return (
-            f"Thank you for providing that detail ({latest_message}). Knowing this helps clarify the pattern. "
-            "Are you noticing any other symptoms accompanying this, or does anything specifically aggravate or relieve it?"
-            f"{vitals_note}"
-        )
-
-    # 5.5 Vitals Query
-    if intent.get("intent") == "VITALS_QUERY" or intent.get("is_vitals_query"):
+    # 3. Vitals Query
+    if intent.get("intent") == "VITALS_QUERY" or intent.get("is_vitals_query") or (
+        any(k in text_lower for k in ["vital", "heart rate", "bp", "spo2", "pulse", "oxygen"]) and "what" in text_lower
+    ):
         vitals_detailed = format_detailed_vitals_report(state.vitals)
         if vitals_detailed:
             return (
@@ -183,77 +167,102 @@ def generate_intelligent_clinical_fallback(
             return (
                 "You currently have no vital signs on record. "
                 "If you wear a connected smartwatch (via Health Connect), readings will sync automatically. "
-                "You can also simply tell me your readings right here (for example: 'My heart rate is 72 and blood pressure is 120/80') "
-                "and I will update your chart right away."
+                "You can also tell me your readings right here (e.g. 'My heart rate is 72 and blood pressure is 120/80') "
+                "and I will update your chart immediately."
             )
 
-    # 5.6 Vitals Update confirmation
+    # 4. Vitals Update confirmation
     if intent.get("intent") == "VITALS_UPDATE" or intent.get("is_vitals_update"):
         vitals_detailed = format_detailed_vitals_report(state.vitals)
         return (
             "I've updated your chart with your vital signs:\n\n"
             f"{vitals_detailed if vitals_detailed else (vitals_summary or 'Readings have been recorded successfully.')}\n\n"
-            "Thank you for keeping your health record updated. How can I assist you with your health today?"
+            "Thank you for keeping your health record updated. How can I assist you further?"
         )
 
-    # 6. Simple Direct Question
-    if intent.get("is_simple_question"):
-        if "paracetamol" in text_lower and ("food" in text_lower or "empty" in text_lower):
-            return "Yes, Paracetamol (acetaminophen) can safely be taken with or without food. Just be sure to follow the recommended dosage and not exceed 3,000 mg in 24 hours."
-        if "ibuprofen" in text_lower and ("food" in text_lower or "empty" in text_lower):
-            return "Ibuprofen should ideally be taken with food or a glass of milk to protect your stomach lining from irritation."
-        if "blood pressure" in text_lower or "bp" in text_lower:
-            return "A normal adult resting blood pressure is generally under 120/80 mmHg. Readings between 120–129 systolic are considered elevated, while 130/80 mmHg or higher enters hypertension categories."
+    # 5. Symptom Resolution acknowledgment
+    if intent.get("intent") == "RESOLUTION" or memory.get("resolved_symptoms"):
+        resolved_names = ", ".join(memory.get("resolved_symptoms", []))
+        if resolved_names:
+            return f"That is great news that your {resolved_names} has resolved! Is there anything else you'd like to check or discuss today?"
+        return "I'm glad to hear that you are feeling better and that has cleared up. Is there anything else you'd like to discuss?"
 
-    # 7. Topic-specific conversational answers (natural, conversational, no canned essays)
+    # 6. Combined Throat Pain + Cough
+    if any(k in text_lower for k in ["throat", "swallow"]) and any(k in text_lower for k in ["cough", "cold", "congestion"]):
+        return (
+            "For a combination of throat pain and cough:\n\n"
+            "• **For throat pain & inflammation**: Over-the-counter anti-inflammatories like **Ibuprofen (400 mg with food)** or **Paracetamol/Acetaminophen (500–650 mg)** will significantly reduce pain when swallowing.\n"
+            "• **For the cough**: Warm tea with honey (1–2 teaspoons) soothes the throat and calms coughing naturally. If it is a dry, hacking cough, a **Dextromethorphan** cough syrup can help suppress the reflex, especially before sleep.\n"
+            "• **Home care**: Gargling with warm salt water (1/2 tsp salt in warm water, 3–4 times daily) helps reduce pharyngeal swelling.\n\n"
+            "Are you also running a fever or noticing any difficulty swallowing liquids?"
+            f"{vitals_note}"
+        )
+
+    # 7. Throat Pain / Sore Throat
     if any(k in text_lower for k in ["throat", "swallow", "tonsil", "strep"]):
         return (
-            "Sore throats are frequently caused by viral pharyngitis, though bacterial strep is also possible. "
-            "Warm salt water gargles and warm tea with honey help soothe the inflamed tissue. "
-            "Over-the-counter anti-inflammatories like Ibuprofen can ease the pain when swallowing.\n\n"
-            "Do you have a fever or see any white spots on your tonsils?"
+            "For throat pain and soreness:\n\n"
+            "• **Pain relief**: **Ibuprofen (400 mg every 6–8 hours with food)** or **Paracetamol (500–650 mg every 6 hours)** are the most effective over-the-counter options for easing throat discomfort and inflammation.\n"
+            "• **Local soothing**: Anesthetic throat lozenges (containing benzocaine, menthol, or amylmetacresol) temporarily numb pain. Warm salt-water gargles (1/2 tsp salt in warm water) 3 to 4 times a day reduce local swelling.\n"
+            "• **Hydration**: Warm broths and herbal teas with honey help coat and soothe the irritated mucous membranes.\n\n"
+            "Do you have a fever, or do you notice any white patches or swollen glands in your neck?"
             f"{vitals_note}"
         )
 
-    if any(k in text_lower for k in ["back pain", "lower back", "spine", "lumbar", "sciatica"]):
+    # 8. Cough & Congestion
+    if any(k in text_lower for k in ["cough", "cold", "congestion", "phlegm", "mucus"]):
         return (
-            "Lower back discomfort is often due to muscular strain or prolonged sitting. "
-            "Gentle walking, alternating warm heat with cold packs, and avoiding prolonged awkward posture are the most effective initial steps. "
-            "Staying gently active generally speeds recovery much more than complete bed rest.\n\n"
-            "Does the discomfort radiate down your leg, or is it confined to your lower back?"
+            "For cough relief, the best over-the-counter medicine depends on the type of cough:\n\n"
+            "• **Dry, tickly cough**: A cough suppressant like **Dextromethorphan** (15–30 mg every 6–8 hours) calms the cough center in the brain. Honey (1–2 teaspoons) is also clinically shown to soothe night-time dry coughing.\n"
+            "• **Productive / chesty cough (with phlegm)**: An expectorant like **Guaifenesin** (200–400 mg every 4 hours) thins mucus so your airways can clear it easily.\n"
+            "• **Supportive relief**: Steam inhalation or using a cool-mist humidifier, along with generous hydration (warm water, broths), thins secretions and eases irritation.\n\n"
+            "Is your cough mostly dry and hacking, or are you bringing up colored phlegm?"
             f"{vitals_note}"
         )
 
-    if any(k in text_lower for k in ["cough", "cold", "congestion", "phlegm"]):
+    # 9. Headache / Migraine
+    if any(k in text_lower for k in ["headache", "migraine", "head hurts", "head ache"]):
         return (
-            "A persistent cough and congestion usually follow an upper respiratory viral illness. "
-            "Staying well hydrated, using steam or a humidifier, and taking honey before bed can significantly calm the cough reflex.\n\n"
-            "Is the cough dry or are you bringing up colored phlegm?"
+            "For headache relief:\n\n"
+            "• **Over-the-counter options**: **Paracetamol/Acetaminophen (500–1000 mg)** or **Ibuprofen (400 mg with food)** are first-line options for tension headaches and mild migraines.\n"
+            "• **Practical care**: Drink a large glass of water right away (dehydration is one of the most common triggers), rest in a quiet, dark room, and apply a cool damp cloth or ice pack to your forehead or temples.\n\n"
+            "Did this headache start suddenly, or has it built up gradually over the day?"
             f"{vitals_note}"
         )
 
-    if any(k in text_lower for k in ["headache", "migraine", "head hurts"]):
+    # 10. Fever / Body Aches
+    if any(k in text_lower for k in ["fever", "chills", "body ache", "body pain", "aches"]):
         return (
-            "Headaches are commonly triggered by tension, eye strain, dehydration, or lack of sleep. "
-            "Resting in a quiet, dark room, drinking plenty of water, and applying a cool compress to your forehead can help alleviate the pain.\n\n"
-            "Did this headache start suddenly, or has it built up gradually?"
+            "For fever and body aches:\n\n"
+            "• **Antipyretics & Pain Relief**: **Paracetamol (500–650 mg every 6 hours)** or **Ibuprofen (400 mg every 8 hours with food)** help bring down elevated body temperature and relieve muscle aches.\n"
+            "• **Supportive measures**: Rest, light clothing, and plenty of fluids (water, electrolyte solutions) are vital to prevent dehydration.\n\n"
+            "Have you measured your body temperature with a thermometer?"
             f"{vitals_note}"
         )
 
-    if any(k in text_lower for k in ["rash", "skin", "itch", "hives"]):
+    # 11. General Medicine / Remedy Query
+    if any(w in text_lower for w in ["medicine", "medicines", "medication", "pill", "tablet", "remedy", "syrup"]):
         return (
-            "Skin irritations can arise from contact dermatitis, localized allergic reactions, or dry skin. "
-            "Keeping the area clean, avoiding harsh soaps, and applying a cool damp cloth or mild moisturizer can calm the irritation.\n\n"
-            "Where is the rash located, and does it itch or burn?"
+            f"Regarding medicines for your symptoms ({latest_message}):\n\n"
+            "Common over-the-counter options include **Paracetamol (500–650 mg)** for pain and fever, **Ibuprofen (400 mg with food)** for inflammation and pain, and targeted syrups like **Dextromethorphan** for dry cough or **Guaifenesin** for chest congestion.\n\n"
+            "Could you specify which symptom is bothering you the most right now so I can recommend the most appropriate option?"
+            f"{vitals_note}"
+        )
+
+    # 12. Conversational clarification or update
+    if intent.get("intent") == "SYMPTOM_UPDATE" or intent.get("intent") == "CONVERSATIONAL":
+        return (
+            f"Understood regarding that detail ({latest_message}). Knowing this helps clarify the pattern. "
+            "Are you noticing any other symptoms accompanying this, or does anything specifically aggravate or relieve it?"
+            f"{vitals_note}"
         )
 
     # General adaptive guidance
     return (
-        f"I hear you regarding {latest_message}. To help me evaluate this accurately, "
-        "could you describe how long this has been going on and how severe the discomfort feels?"
+        f"I hear you regarding '{latest_message}'. To provide the best guidance, "
+        "could you describe how severe it feels and whether you have any other accompanying symptoms?"
         f"{vitals_note}"
     )
-
 
 # Backward compatibility alias
 generate_fallback_clinical_response = lambda state, user_message, prior_messages=None: generate_intelligent_clinical_fallback(

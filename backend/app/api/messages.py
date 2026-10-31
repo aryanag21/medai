@@ -160,10 +160,10 @@ async def send_message(
     db.add(user_message)
     await db.flush()
 
-    # Extract symptoms on any turn to keep clinical state up to date
+    # Extract symptoms on any turn to keep clinical state up to date (fast deterministic extractor)
     try:
-        from app.patient_state.extraction import extract_symptoms_from_conversation
-        extracted = await extract_symptoms_from_conversation(llm, [payload.content])
+        from app.patient_state.extraction import extract_symptoms_rule_based
+        extracted = extract_symptoms_rule_based([payload.content])
         for s in extracted:
             existing = await db.execute(
                 select(Symptom).where(

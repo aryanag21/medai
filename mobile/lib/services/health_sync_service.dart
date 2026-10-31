@@ -80,8 +80,11 @@ class HealthSyncService {
     void Function(String message)? onProgress,
   }) async {
     final now = DateTime.now();
-    // Generous 24-hour lookback ensures wearable readings from Nothing X are ALWAYS found
-    final startTime = now.subtract(defaultLookback);
+    final lastSync = await getLastSyncTime();
+    // Incremental lookback: if synced recently, only fetch new readings with a 5-minute safety buffer
+    final startTime = (lastSync != null && now.difference(lastSync) < defaultLookback)
+        ? lastSync.subtract(const Duration(minutes: 5))
+        : now.subtract(defaultLookback);
 
     onProgress?.call('Reading wearable vitals from Health Connect...');
     final readings = await _adapter.readRange(startTime: startTime, endTime: now);
