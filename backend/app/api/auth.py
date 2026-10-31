@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import create_token, decode_token, hash_password, verify_password
-from app.db.models import Patient, User
+from app.db.models import Patient, PatientProfile, User
 from app.db.session import get_db
 from app.schemas.auth import AccessTokenResponse, LoginRequest, RefreshRequest, RegisterRequest, TokenResponse
 
@@ -23,7 +23,11 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
     db.add(user)
     await db.flush()
 
-    db.add(Patient(user_id=user.id))
+    patient = Patient(user_id=user.id)
+    db.add(patient)
+    await db.flush()
+
+    db.add(PatientProfile(patient_id=patient.id))
     await db.commit()
 
     return TokenResponse(

@@ -120,33 +120,41 @@ async def send_message(
             db.add(MedicalHistory(patient_id=patient.id, condition=content_cleaned, status="active"))
 
     # Update profile fields if user answered demographic questions
-    profile = await db.get(PatientProfile, patient.id)
-    if profile is None:
-        profile = PatientProfile(patient_id=patient.id)
-        db.add(profile)
+    is_demographic_question = any(q in last_question for q in ["age", "how old", "sex", "gender", "height", "weight"])
+    if is_demographic_question:
+        profile = await db.get(PatientProfile, patient.id)
+        if profile is None:
+            try:
+                profile = PatientProfile(patient_id=patient.id)
+                db.add(profile)
+                await db.flush()
+            except Exception:
+                await db.rollback()
+                profile = await db.get(PatientProfile, patient.id)
 
-    if "age" in last_question or "how old" in last_question:
-        import re
-        match = re.search(r"\b(\d{1,3})\b", content_cleaned)
-        if match:
-            profile.age = int(match.group(1))
-    elif "sex" in last_question or "gender" in last_question:
-        if "male" in content_lower and "female" not in content_lower:
-            profile.sex = "male"
-        elif "female" in content_lower:
-            profile.sex = "female"
-        elif content_lower in ["other", "non-binary"]:
-            profile.sex = content_cleaned
-    elif "height" in last_question:
-        import re
-        match = re.search(r"(\d+(\.\d+)?)", content_cleaned)
-        if match:
-            profile.height_cm = float(match.group(1))
-    elif "weight" in last_question:
-        import re
-        match = re.search(r"(\d+(\.\d+)?)", content_cleaned)
-        if match:
-            profile.weight_kg = float(match.group(1))
+        if profile is not None:
+            if "age" in last_question or "how old" in last_question:
+                import re
+                match = re.search(r"\b(\d{1,3})\b", content_cleaned)
+                if match:
+                    profile.age = int(match.group(1))
+            elif "sex" in last_question or "gender" in last_question:
+                if "male" in content_lower and "female" not in content_lower:
+                    profile.sex = "male"
+                elif "female" in content_lower:
+                    profile.sex = "female"
+                elif content_lower in ["other", "non-binary"]:
+                    profile.sex = content_cleaned
+            elif "height" in last_question:
+                import re
+                match = re.search(r"(\d+(\.\d+)?)", content_cleaned)
+                if match:
+                    profile.height_cm = float(match.group(1))
+            elif "weight" in last_question:
+                import re
+                match = re.search(r"(\d+(\.\d+)?)", content_cleaned)
+                if match:
+                    profile.weight_kg = float(match.group(1))
 
     user_message = Message(conversation_id=conversation.id, role="user", content=payload.content)
     db.add(user_message)
